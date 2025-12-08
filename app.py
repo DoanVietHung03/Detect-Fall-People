@@ -21,7 +21,7 @@ if 'snapshot_history' not in st.session_state:
 
 st.sidebar.title("⚙️ Cấu hình")
 conf_thresh = st.sidebar.slider("Độ tin cậy (Confidence)", 0.0, 1.0, 0.8, 0.05) 
-fall_thresh = st.sidebar.slider("Ngưỡng tỷ lệ ngã (W/H Ratio)", 0.5, 2.0, 2.0, 0.1)
+fall_thresh = st.sidebar.slider("Ngưỡng tỷ lệ ngã (W/H Ratio)", 0.5, 3.0, 3.0, 0.1)
 uploaded_file = st.sidebar.file_uploader("Chọn video đầu vào", type=['mp4', 'avi', 'mov'])
 
 col1, col2 = st.columns([3, 1])
