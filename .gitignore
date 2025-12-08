@@ -1,0 +1,4 @@
+__pycache__/
+Test_vid/
+yolo11s-pose.pt
+snapshots/
