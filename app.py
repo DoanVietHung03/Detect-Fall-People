@@ -1,91 +1,139 @@
 import streamlit as st
 import cv2
-import tempfile
 import os
+import glob
+import shutil
+import tempfile
 from fall_logic import FallDetector
 
-st.set_page_config(page_title="Hệ thống Phát hiện Ngã", layout="wide")
-st.title("🚨 Surveillance Fall Detection System")
+# --- CẤU HÌNH ---
+st.set_page_config(page_title="Hệ thống Phát hiện Ngã", layout="wide", page_icon="🚨")
+VIDEO_DIR = "samples"
+SNAPSHOT_DIR = "snapshots"
 
-# --- CSS tùy chỉnh để làm đẹp ---
+# --- CSS TÙY CHỈNH ---
 st.markdown("""
     <style>
         .stImage { border: 2px solid #ddd; border-radius: 5px; }
         div[data-testid="stMetricValue"] { font-size: 20px; }
+        div.stButton > button:first-child {
+            width: 100%; text-align: left; padding-left: 15px; border: 1px solid #eee;
+        }
+        div.stButton > button:hover {
+            border-color: #ff4b4b; color: #ff4b4b;
+        }
     </style>
 """, unsafe_allow_html=True)
 
-# --- Session State để lưu lịch sử snapshot ---
-if 'snapshot_history' not in st.session_state:
-    st.session_state['snapshot_history'] = []
+st.title("🚨 AI Surveillance Fall Detection")
 
-st.sidebar.title("⚙️ Cấu hình")
-conf_thresh = st.sidebar.slider("Độ tin cậy (Confidence)", 0.0, 1.0, 0.8, 0.05) 
-fall_thresh = st.sidebar.slider("Ngưỡng tỷ lệ ngã (W/H Ratio)", 0.5, 3.0, 3.0, 0.1)
-uploaded_file = st.sidebar.file_uploader("Chọn video đầu vào", type=['mp4', 'avi', 'mov'])
+# --- QUẢN LÝ STATE ---
+if 'selected_video_path' not in st.session_state:
+    st.session_state['selected_video_path'] = None
 
-col1, col2 = st.columns([3, 1])
+# --- HÀM HỖ TRỢ ---
+def clear_history():
+    if os.path.exists(SNAPSHOT_DIR):
+        try:
+            shutil.rmtree(SNAPSHOT_DIR)
+            os.makedirs(SNAPSHOT_DIR)
+        except Exception: pass
+    else:
+        os.makedirs(SNAPSHOT_DIR)
 
-with col2:
-    st.subheader("📋 Nhật ký báo động")
-    alert_container = st.container() # Vùng chứa danh sách ảnh
+def get_video_files():
+    if not os.path.exists(VIDEO_DIR): os.makedirs(VIDEO_DIR); return []
+    exts = ['*.mp4', '*.avi', '*.mov', '*.mkv']
+    files = []
+    for ext in exts: files.extend(glob.glob(os.path.join(VIDEO_DIR, ext)))
+    return sorted([os.path.basename(f) for f in files])
+
+# ================= SIDEBAR =================
+with st.sidebar:
+    st.header("⚙️ Cấu hình Model")
+    conf_thresh = st.slider("Độ tin cậy (Confidence)", 0.3, 1.0, 0.85, 0.05) 
+    fall_thresh = st.slider("Ngưỡng tỷ lệ (Aspect Ratio)", 0.5, 3.0, 2.5, 0.1)
+
+    st.divider()
+    st.subheader("📂 Danh sách Video")
+    video_files = get_video_files()
+    if video_files:
+        for vid_name in video_files:
+            if st.button(f"▶ {vid_name}", key=vid_name):
+                st.session_state['selected_video_path'] = os.path.join(VIDEO_DIR, vid_name)
+                clear_history()
+                st.rerun()
     
     st.divider()
-    stop_button = st.button("Dừng hệ thống", type="primary")
-
-if uploaded_file is not None:
-    try:
+    uploaded_file = st.file_uploader("Tải video lên", type=['mp4', 'avi'])
+    if uploaded_file:
         tfile = tempfile.NamedTemporaryFile(delete=False) 
         tfile.write(uploaded_file.read())
-    except Exception as e:
-        st.error(f"Lỗi khi tải video: {e}")
-        st.stop()
-    
-    with st.spinner('Đang khởi tạo mô hình AI...'):
-        # Lưu ý: Class FallDetector đã được update bên trên
-        detector = FallDetector(conf_threshold=conf_thresh, fall_ratio=fall_thresh)
-    
-    cap = cv2.VideoCapture(tfile.name)
-    st_frame = col1.empty()
+        if st.session_state['selected_video_path'] != tfile.name:
+             st.session_state['selected_video_path'] = tfile.name
+             clear_history()
+             st.rerun()
 
-    while cap.isOpened() and not stop_button:
+# ================= MAIN UI =================
+col_video, col_alert = st.columns([3, 1.2])
+
+with col_alert:
+    st.subheader("📋 Trạng thái & Bằng chứng")
+    # KHỞI TẠO CÁC PLACEHOLDER CỐ ĐỊNH (Quan trọng!)
+    status_ph = st.empty()       # 1. Khung hiển thị trạng thái Realtime
+    st.divider()
+    gallery_ph = st.empty()      # 2. Khung hiển thị Ảnh bằng chứng (Dùng st.empty thay vì container)
+    st.divider()
+    stop_btn = st.button("⏹ DỪNG HỆ THỐNG", type="primary")
+
+video_path = st.session_state.get('selected_video_path')
+
+if video_path and not stop_btn:
+    st.info(f"Đang xử lý: **{os.path.basename(video_path)}**")
+    
+    detector = FallDetector(conf_threshold=conf_thresh, fall_ratio=fall_thresh)
+    cap = cv2.VideoCapture(video_path)
+    frame_ph = col_video.empty()
+
+    while cap.isOpened():
         ret, frame = cap.read()
         if not ret: break
 
         detector.conf_threshold = conf_thresh
         detector.fall_ratio_threshold = fall_thresh
 
-        # --- NHẬN THÊM BIẾN SNAPSHOT_DIR ---
-        processed_frame, fall_count, snapshot_dir = detector.process_frame(frame)
+        processed_frame, fall_count, _ = detector.process_frame(frame)
 
-        # Hiển thị Video Main
-        st_frame.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), channels="RGB")
+        # 1. Hiển thị Video
+        frame_ph.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), channels="RGB", width='content')
 
-    # Hiển thị Gallery (Bên phải)
-    with alert_container:
+        # 2. Hiển thị Trạng thái (Ghi đè nội dung cũ của status_ph)
         if fall_count > 0:
-            st.error(f"⚠️ ĐANG CÓ NGƯỜI NGÃ!", icon="🚨")
-        
-        # Quét thư mục snapshot để lấy danh sách ảnh
-        # Lọc file .jpg
-        if os.path.exists(snapshot_dir):
-            images = [f for f in os.listdir(snapshot_dir) if f.endswith('.jpg')]
-            
-            if not images:
-                st.info("Chưa có dữ liệu ngã.")
-            else:
-                st.write("📸 Bằng chứng (Best Score):")
-                # Hiển thị các ảnh tìm được
-                for img_file in images:
-                    img_path = os.path.join(snapshot_dir, img_file)
-                    # Dùng time để trick bộ nhớ đệm browser, giúp ảnh update realtime
-                    # mỗi khi file bị ghi đè bởi score cao hơn
-                    st.image(img_path, caption=img_file, width='stretch')
-                    
-                    # Nút xóa nhanh nếu muốn reset thủ công
-                    if st.button(f"Xóa {img_file}", key=img_file):
-                        os.remove(img_path)
-                        st.experimental_rerun()
+            status_ph.error(f"🚨 CẢNH BÁO: {fall_count} NGƯỜI NGÃ!", icon="⚠️")
+        else:
+            status_ph.success("✅ Khu vực an toàn", icon="🛡️")
+
+        # 3. Hiển thị Gallery (Dùng context manager của gallery_ph)
+        # Kỹ thuật: gallery_ph.container() sẽ tạo ra một container tạm thời,
+        # thay thế HOÀN TOÀN nội dung cũ của gallery_ph trong mỗi vòng lặp.
+        with gallery_ph.container():
+            if os.path.exists(SNAPSHOT_DIR):
+                images = sorted(glob.glob(os.path.join(SNAPSHOT_DIR, '*.jpg')))
+                
+                if not images:
+                    st.info("Chưa ghi nhận sự cố nào.", icon="📝")
+                else:
+                    st.warning(f"📸 Đã lưu {len(images)} hồ sơ sự cố:")
+                    for img_path in images:
+                        file_name = os.path.basename(img_path)
+                        display_name = file_name.replace("fall_evidence_", "").replace(".jpg", "")
+                        # FIX LỖI WARNING VÀNG: Dùng use_container_width=True
+                        st.image(img_path, caption=f"ID: {display_name}", width='content')
 
     cap.release()
-    st.success("Đã dừng hệ thống phát hiện ngã.")
+    st.success("Đã kết thúc video.")
+
+elif stop_btn:
+    st.write("Đã dừng hệ thống.")
+else:
+    col_video.info("👈 Chọn video để bắt đầu.")

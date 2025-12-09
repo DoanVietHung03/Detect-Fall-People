@@ -7,7 +7,7 @@ from ultralytics import YOLO
 from supervision import ByteTrack, BoxAnnotator, LabelAnnotator, Detections, Color, ColorPalette
 
 class FallDetector:
-    def __init__(self, model_path='yolo11s-pose.pt', conf_threshold=0.8, fall_ratio=3.0):
+    def __init__(self, model_path='yolo11s-pose.pt', conf_threshold=0.85, fall_ratio=2.5):
         self.conf_threshold = conf_threshold
         self.fall_ratio_threshold = fall_ratio
         
@@ -102,6 +102,56 @@ class FallDetector:
         
         # Ngưỡng cho chân lỏng hơn chút, khoảng 45-50 độ
         return leg_angle > 45.0
+    
+    def check_torso_upright(self, kp, box_height):
+        """
+        Kiểm tra xem thân người có đang dựng đứng hay không.
+        Dùng để loại trừ trường hợp ngồi/quỳ (Box vuông nhưng lưng thẳng).
+        """
+        # 5,6: Vai | 11,12: Hông
+        # Kiểm tra độ tin cậy keypoint
+        if (kp[5][2] < 0.5 or kp[6][2] < 0.5 or kp[11][2] < 0.5 or kp[12][2] < 0.5):
+            return False # Không đủ điểm để phán đoán -> coi như không thẳng
+
+        # Tính trung bình Y của vai và hông
+        shoulder_y = (kp[5][1] + kp[6][1]) / 2
+        hip_y = (kp[11][1] + kp[12][1]) / 2
+
+        # Tính khoảng cách dọc
+        # Lưu ý: Trong ảnh, Y tăng dần từ trên xuống dưới.
+        # Nên nếu đứng thẳng: Hip_Y > Shoulder_Y (Hông ở dưới vai)
+        vertical_dist = hip_y - shoulder_y
+        
+        # Nếu khoảng cách giữa vai và hông chiếm > 30% chiều cao bounding box
+        # -> Chứng tỏ người đó đang giữ lưng thẳng (dù đang quỳ hay đứng)
+        if vertical_dist > (box_height * 0.3):
+            return True
+        return False
+    
+    def check_head_high(self, kp, box_ymin, box_ymax):
+        """
+        Kiểm tra xem đầu có nằm ở vùng cao nhất của Bounding Box hay không.
+        Dùng để phân biệt giữa NGÃ DỌC (đầu thấp/giữa) và QUỲ/NGỒI (đầu cao).
+        """
+        # Keypoints: 0-Nose, 1-Left Eye, 2-Right Eye, 3-Left Ear, 4-Right Ear
+        head_y_coords = []
+        for i in range(5): 
+            if kp[i][2] > 0.5: # Chỉ lấy điểm tin cậy
+                head_y_coords.append(kp[i][1])
+        
+        if not head_y_coords:
+            return False # Không thấy đầu -> Bỏ qua check này
+
+        avg_head_y = sum(head_y_coords) / len(head_y_coords)
+        box_height = box_ymax - box_ymin
+        
+        # Tính vị trí tương đối (0.0 là đỉnh trên cùng, 1.0 là đáy dưới cùng)
+        relative_pos = (avg_head_y - box_ymin) / box_height
+        
+        # Nếu đầu nằm trong 25% phía trên của box -> AN TOÀN (Đang quỳ/ngồi)
+        if relative_pos < 0.25:
+            return True
+        return False
 
     def process_frame(self, frame):
         results = self.model(frame, verbose=False, conf=self.conf_threshold, device=self.device, classes=[0])[0]
@@ -139,10 +189,17 @@ class FallDetector:
             ratio = self.calculate_aspect_ratio(xyxy)
             angle = None
             legs_are_standing = False
+            
+            # Ngưỡng cảnh báo cho trường hợp ngã dọc (Vertical Fall)
+            VERTICAL_FALL_RATIO_LIMIT = 0.9
 
+            box_height = xyxy[3] - xyxy[1] # Tính chiều cao box
+            is_upright = False
+            
             if matched_kps is not None:
                 angle = self.calculate_spine_angle(matched_kps)
                 legs_are_standing = self.check_legs_standing(matched_kps)
+                is_upright = self.check_torso_upright(matched_kps, box_height)
 
             # --- TỔNG HỢP LUẬT THÔNG MINH ---
             if angle is not None:
@@ -153,16 +210,31 @@ class FallDetector:
                     if legs_are_standing:
                         # Lưng ngang + Chân đứng => Đang CÚI (Bending)
                         is_fall = False 
-                        debug_info = f"BENDING (Ang:{angle:.0f})"
+                        debug_info = f"BENDING (Angle:{angle:.0f})"
                     else:
                         # Lưng ngang + Chân ngang => NGÃ THẬT
                         is_fall = True
                         current_score = 90 - angle
-                        debug_info = f"FALL! (Ang:{angle:.0f})"
+                        debug_info = f"FALL! (Angle:{angle:.0f})"
+                # TRƯỜNG HỢP 2: Góc lưng lớn (> 15 độ) -> Cần phân biệt Ngã Dọc vs Quỳ/Ngồi
                 else:
-                    # Lưng thẳng đứng
-                    is_fall = False
-                    debug_info = f"OK (Ang:{angle:.0f})"
+                    # Nếu tỷ lệ vuông vức (giống ngã hoặc quỳ)
+                    if ratio > VERTICAL_FALL_RATIO_LIMIT:
+                        # KIỂM TRA MỚI: Đầu có ở trên cao không?
+                        is_head_high = self.check_head_high(matched_kps, xyxy[1], xyxy[3])
+                        
+                        if is_head_high:
+                            # Box vuông + Đầu ở đỉnh -> Đang Quỳ/Ngồi -> AN TOÀN
+                            is_fall = False
+                            debug_info = f"KNEEL (Ratio:{ratio:.1f})"
+                        else:
+                            # Box vuông + Đầu không ở đỉnh -> Ngã hướng camera -> BÁO ĐỘNG
+                            is_fall = True
+                            current_score = ratio * 10
+                            debug_info = f"FALL (Ratio:{ratio:.1f})"
+                    else:
+                        is_fall = False
+                        debug_info = f"OK (Angle:{angle:.0f})"
             else:
                 # Fallback: Không thấy xương -> Dùng Ratio
                 current_score = ratio
