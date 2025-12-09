@@ -114,8 +114,6 @@ if video_path and not stop_btn:
             status_ph.success("✅ Khu vực an toàn", icon="🛡️")
 
         # 3. Hiển thị Gallery (Dùng context manager của gallery_ph)
-        # Kỹ thuật: gallery_ph.container() sẽ tạo ra một container tạm thời,
-        # thay thế HOÀN TOÀN nội dung cũ của gallery_ph trong mỗi vòng lặp.
         with gallery_ph.container():
             if os.path.exists(SNAPSHOT_DIR):
                 images = sorted(glob.glob(os.path.join(SNAPSHOT_DIR, '*.jpg')))

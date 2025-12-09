@@ -172,7 +172,7 @@ class FallDetector:
             matched_kps = None
             min_dist = 99999
             
-            # (Phần matching này giữ nguyên như cũ để đơn giản)
+            # Tính khoảng cách giữa trung bình box và keypoints
             for box, kps in zip(results.boxes.xyxy, results.keypoints.data):
                 orig_center = ((box[0]+box[2])/2, (box[1]+box[3])/2)
                 dist = math.hypot(track_center[0]-orig_center[0], track_center[1]-orig_center[1])
@@ -201,7 +201,7 @@ class FallDetector:
                 legs_are_standing = self.check_legs_standing(matched_kps)
                 is_upright = self.check_torso_upright(matched_kps, box_height)
 
-            # --- TỔNG HỢP LUẬT THÔNG MINH ---
+            # --- TỔNG HỢP LUẬT RULE-BASED ---
             if angle is not None:
                 # 1. Kiểm tra góc Lưng
                 if angle < self.fall_angle_threshold: # Lưng nằm ngang (< 15 độ)
@@ -216,7 +216,20 @@ class FallDetector:
                         is_fall = True
                         current_score = 90 - angle
                         debug_info = f"FALL! (Angle:{angle:.0f})"
-                # TRƯỜNG HỢP 2: Góc lưng lớn (> 15 độ) -> Cần phân biệt Ngã Dọc vs Quỳ/Ngồi
+                # TRƯỜNG HỢP 2: "Vùng xám" (Lưng nghiêng 15 - 60 độ)
+                elif angle < 60: 
+                    # Logic mới: Lưng nghiêng + Chân không đứng vững = NGÃ (Tư thế bò/khuỵu)
+                    if not legs_are_standing:
+                        # Kiểm tra thêm: Đầu có thấp không? (Để tránh nhầm với cúi người tập thể dục)
+                        # Nếu lưng nghiêng và chân không thẳng, khả năng cao là ngã
+                        is_fall = True
+                        current_score = 70 # Score thấp hơn ngã nằm
+                        debug_info = f"FALL (Angle:{angle:.0f})"
+                    else:
+                        # Lưng nghiêng nhưng chân vẫn trụ -> Có thể đang cúi lấy đồ
+                        is_fall = False
+                        debug_info = f"BENDING (Angle:{angle:.0f})"
+                # TRƯỜNG HỢP 3: Lưng khá thẳng (> 60 độ)
                 else:
                     # Nếu tỷ lệ vuông vức (giống ngã hoặc quỳ)
                     if ratio > VERTICAL_FALL_RATIO_LIMIT:
