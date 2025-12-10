@@ -4,7 +4,7 @@ import os
 import glob
 import shutil
 import tempfile
-from fall_logic import FallDetector
+from inference import FallDetector
 
 # --- CẤU HÌNH ---
 st.set_page_config(page_title="Hệ thống Phát hiện Ngã", layout="wide", page_icon="🚨")
@@ -52,7 +52,8 @@ def get_video_files():
 with st.sidebar:
     st.header("⚙️ Cấu hình Model")
     conf_thresh = st.slider("Độ tin cậy (Confidence)", 0.3, 1.0, 0.85, 0.05) 
-    fall_thresh = st.slider("Ngưỡng tỷ lệ (Aspect Ratio)", 0.5, 3.0, 2.5, 0.1)
+    lstm_thresh = st.slider("Ngưỡng nhạy ngã (LSTM)", 0.5, 0.99, 0.75, 0.05)
+    st.caption("Ngưỡng càng cao, AI càng ít báo ảo nhưng có thể bỏ sót.")
 
     st.divider()
     st.subheader("📂 Danh sách Video")
@@ -91,17 +92,24 @@ video_path = st.session_state.get('selected_video_path')
 if video_path and not stop_btn:
     st.info(f"Đang xử lý: **{os.path.basename(video_path)}**")
     
-    detector = FallDetector(conf_threshold=conf_thresh, fall_ratio=fall_thresh)
+    detector = FallDetector(conf_threshold=conf_thresh, lstm_threshold=lstm_thresh)
     cap = cv2.VideoCapture(video_path)
     frame_ph = col_video.empty()
+    
+    frame_count = 0
+    SKIP_RATE = 2  # Xử lý mỗi 2 frame để tăng tốc độ
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret: break
+        
+        frame_count += 1
+        if frame_count % (SKIP_RATE + 1) != 0:
+            frame_ph.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", width='content')
+            continue
 
         detector.conf_threshold = conf_thresh
-        detector.fall_ratio_threshold = fall_thresh
-
+        detector.lstm_threshold = lstm_thresh
         processed_frame, fall_count, _ = detector.process_frame(frame)
 
         # 1. Hiển thị Video

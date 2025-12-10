@@ -1,4 +1,6 @@
 __pycache__/
 samples/
-yolo11s-pose.pt
 snapshots/
+Dataset/
+weights/
+data_kps/
