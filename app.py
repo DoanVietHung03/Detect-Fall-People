@@ -4,142 +4,194 @@ import os
 import glob
 import shutil
 import tempfile
+import threading
+import queue
+import time
 from inference import FallDetector
 
 # --- CẤU HÌNH ---
-st.set_page_config(page_title="Hệ thống Phát hiện Ngã", layout="wide", page_icon="🚨")
+st.set_page_config(page_title="Hệ thống Phát hiện Ngã (Optimized)", layout="wide", page_icon="⚡")
 VIDEO_DIR = "samples"
 SNAPSHOT_DIR = "snapshots"
 
-# --- CSS TÙY CHỈNH ---
+# --- CSS ---
 st.markdown("""
     <style>
         .stImage { border: 2px solid #ddd; border-radius: 5px; }
         div[data-testid="stMetricValue"] { font-size: 20px; }
-        div.stButton > button:first-child {
-            width: 100%; text-align: left; padding-left: 15px; border: 1px solid #eee;
-        }
-        div.stButton > button:hover {
-            border-color: #ff4b4b; color: #ff4b4b;
-        }
     </style>
 """, unsafe_allow_html=True)
-
-st.title("🚨 AI Surveillance Fall Detection")
 
 # --- QUẢN LÝ STATE ---
 if 'selected_video_path' not in st.session_state:
     st.session_state['selected_video_path'] = None
+if 'stop_thread' not in st.session_state:
+    st.session_state['stop_thread'] = False
 
-# --- HÀM HỖ TRỢ ---
+# --- CLASS XỬ LÝ ĐA LUỒNG (THREADING) ---
+class VideoProcessor(threading.Thread):
+    def __init__(self, video_path, conf_thresh, lstm_thresh, frame_queue, result_queue):
+        super().__init__()
+        self.video_path = video_path
+        self.conf_thresh = conf_thresh
+        self.lstm_thresh = lstm_thresh
+        self.frame_queue = frame_queue
+        self.result_queue = result_queue
+        self.stopped = False
+        self.detector = None
+
+    def run(self):
+        # Khởi tạo model trong luồng riêng để tránh lag UI
+        self.detector = FallDetector(conf_threshold=self.conf_thresh, lstm_threshold=self.lstm_thresh)
+        cap = cv2.VideoCapture(self.video_path)
+        
+        frame_idx = 0
+        SKIP_FRAMES = 2 # Xử lý 1 frame, bỏ qua 2 frame (Tăng tốc)
+
+        while not self.stopped and cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_idx += 1
+            if frame_idx % (SKIP_FRAMES + 1) != 0:
+                continue
+
+            # 1. Resize ảnh để tăng tốc Inference (Quan trọng!)
+            # YOLO chuẩn là 640, nếu đưa 1080p vào sẽ rất chậm
+            h, w = frame.shape[:2]
+            scale = 640 / w
+            new_h = int(h * scale)
+            resized_frame = cv2.resize(frame, (640, new_h))
+
+            # 2. Cập nhật ngưỡng (nếu user đổi slider)
+            self.detector.conf_threshold = self.conf_thresh
+            self.detector.lstm_threshold = self.lstm_thresh
+
+            # 3. Chạy AI
+            processed_frame, fall_count, snap_dir = self.detector.process_frame(resized_frame)
+
+            # 4. Đẩy kết quả vào hàng đợi (Queue)
+            # Xóa cũ nếu đầy để luôn lấy frame mới nhất (Real-time)
+            if self.result_queue.full():
+                try: self.result_queue.get_nowait()
+                except queue.Empty: pass
+            
+            self.result_queue.put({
+                'frame': processed_frame,
+                'fall_count': fall_count,
+                'snap_dir': snap_dir,
+                'has_new_fall': fall_count > 0 # Cờ báo hiệu có ngã để UI update gallery
+            })
+            
+        cap.release()
+        self.stopped = True
+
+    def stop(self):
+        self.stopped = True
+
+# --- UI FUNCTIONS ---
 def clear_history():
     if os.path.exists(SNAPSHOT_DIR):
-        try:
-            shutil.rmtree(SNAPSHOT_DIR)
-            os.makedirs(SNAPSHOT_DIR)
-        except Exception: pass
-    else:
-        os.makedirs(SNAPSHOT_DIR)
+        try: shutil.rmtree(SNAPSHOT_DIR); os.makedirs(SNAPSHOT_DIR)
+        except: pass
+    else: os.makedirs(SNAPSHOT_DIR)
 
 def get_video_files():
     if not os.path.exists(VIDEO_DIR): os.makedirs(VIDEO_DIR); return []
-    exts = ['*.mp4', '*.avi', '*.mov', '*.mkv']
-    files = []
-    for ext in exts: files.extend(glob.glob(os.path.join(VIDEO_DIR, ext)))
-    return sorted([os.path.basename(f) for f in files])
+    return sorted([f for f in os.listdir(VIDEO_DIR) if f.endswith(('.mp4', '.avi', '.mkv'))])
 
 # ================= SIDEBAR =================
 with st.sidebar:
-    st.header("⚙️ Cấu hình Model")
-    conf_thresh = st.slider("Độ tin cậy (Confidence)", 0.3, 1.0, 0.85, 0.05) 
-    lstm_thresh = st.slider("Ngưỡng nhạy ngã (LSTM)", 0.5, 0.99, 0.75, 0.05)
-    st.caption("Ngưỡng càng cao, AI càng ít báo ảo nhưng có thể bỏ sót.")
-
-    st.divider()
-    st.subheader("📂 Danh sách Video")
-    video_files = get_video_files()
-    if video_files:
-        for vid_name in video_files:
-            if st.button(f"▶ {vid_name}", key=vid_name):
-                st.session_state['selected_video_path'] = os.path.join(VIDEO_DIR, vid_name)
-                clear_history()
-                st.rerun()
+    st.header("⚡ Cấu hình & Tối ưu")
+    conf_thresh = st.slider("Confidence YOLO", 0.3, 1.0, 0.85) 
+    lstm_thresh = st.slider("Ngưỡng LSTM", 0.5, 0.99, 0.75)
     
     st.divider()
-    uploaded_file = st.file_uploader("Tải video lên", type=['mp4', 'avi'])
-    if uploaded_file:
-        tfile = tempfile.NamedTemporaryFile(delete=False) 
-        tfile.write(uploaded_file.read())
-        if st.session_state['selected_video_path'] != tfile.name:
-             st.session_state['selected_video_path'] = tfile.name
-             clear_history()
-             st.rerun()
+    st.subheader("Video")
+    for vid in get_video_files():
+        if st.button(f"▶ {vid}"):
+            st.session_state['selected_video_path'] = os.path.join(VIDEO_DIR, vid)
+            clear_history()
+            st.rerun()
+
+    uploaded = st.file_uploader("Upload Video", type=['mp4'])
+    if uploaded:
+        tfile = tempfile.NamedTemporaryFile(delete=False)
+        tfile.write(uploaded.read())
+        st.session_state['selected_video_path'] = tfile.name
 
 # ================= MAIN UI =================
-col_video, col_alert = st.columns([3, 1.2])
+st.title("⚡ AI Fall Detection (Multi-threaded)")
+col_video, col_info = st.columns([3, 1.5])
 
-with col_alert:
-    st.subheader("📋 Trạng thái & Bằng chứng")
-    # KHỞI TẠO CÁC PLACEHOLDER CỐ ĐỊNH (Quan trọng!)
-    status_ph = st.empty()       # 1. Khung hiển thị trạng thái Realtime
+# Placeholder
+with col_video:
+    video_ph = st.empty()
+with col_info:
+    status_ph = st.empty()
     st.divider()
-    gallery_ph = st.empty()      # 2. Khung hiển thị Ảnh bằng chứng (Dùng st.empty thay vì container)
-    st.divider()
-    stop_btn = st.button("⏹ DỪNG HỆ THỐNG", type="primary")
+    gallery_ph = st.empty() # Gallery placeholder
+    stop_btn = st.button("⏹ DỪNG", type="primary")
 
+# Logic chính
 video_path = st.session_state.get('selected_video_path')
 
 if video_path and not stop_btn:
-    st.info(f"Đang xử lý: **{os.path.basename(video_path)}**")
+    # Hàng đợi giao tiếp giữa 2 luồng
+    frame_queue = queue.Queue(maxsize=1) 
+    result_queue = queue.Queue(maxsize=2) # Chỉ giữ tối đa 2 kết quả chờ để đảm bảo realtime
+
+    # Khởi động luồng AI
+    processor = VideoProcessor(video_path, conf_thresh, lstm_thresh, frame_queue, result_queue)
+    processor.start()
+
+    st.toast(f"Đang khởi động AI Engine...", icon="🚀")
     
-    detector = FallDetector(conf_threshold=conf_thresh, lstm_threshold=lstm_thresh)
-    cap = cv2.VideoCapture(video_path)
-    frame_ph = col_video.empty()
-    
-    frame_count = 0
-    SKIP_RATE = 2  # Xử lý mỗi 2 frame để tăng tốc độ
+    # Biến cache để tránh đọc ổ cứng liên tục
+    cached_images = []
+    last_update_gallery = 0
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret: break
-        
-        frame_count += 1
-        if frame_count % (SKIP_RATE + 1) != 0:
-            frame_ph.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", width='content')
-            continue
+    while processor.is_alive():
+        try:
+            # Chờ lấy kết quả từ luồng AI (timeout 0.1s để không treo UI)
+            data = result_queue.get(timeout=0.1)
+            
+            # 1. Hiển thị Video
+            frame_rgb = cv2.cvtColor(data['frame'], cv2.COLOR_BGR2RGB)
+            video_ph.image(frame_rgb, channels="RGB", width='content')
 
-        detector.conf_threshold = conf_thresh
-        detector.lstm_threshold = lstm_thresh
-        processed_frame, fall_count, _ = detector.process_frame(frame)
+            # 2. Hiển thị Trạng thái
+            if data['fall_count'] > 0:
+                status_ph.error(f"🚨 PHÁT HIỆN: {data['fall_count']} NGƯỜI NGÃ!", icon="⚠️")
+            else:
+                status_ph.success("✅ Đang giám sát...", icon="🛡️")
 
-        # 1. Hiển thị Video
-        frame_ph.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), channels="RGB", width='content')
-
-        # 2. Hiển thị Trạng thái (Ghi đè nội dung cũ của status_ph)
-        if fall_count > 0:
-            status_ph.error(f"🚨 CẢNH BÁO: {fall_count} NGƯỜI NGÃ!", icon="⚠️")
-        else:
-            status_ph.success("✅ Khu vực an toàn", icon="🛡️")
-
-        # 3. Hiển thị Gallery (Dùng context manager của gallery_ph)
-        with gallery_ph.container():
-            if os.path.exists(SNAPSHOT_DIR):
-                images = sorted(glob.glob(os.path.join(SNAPSHOT_DIR, '*.jpg')))
+            # 3. Cập nhật Gallery (Chỉ update khi có ngã hoặc mỗi 5 giây 1 lần)
+            # TỐI ƯU: Không gọi glob.glob mỗi frame!
+            current_time = time.time()
+            if data['has_new_fall'] and (current_time - last_update_gallery > 1.0):
+                last_update_gallery = current_time
+                if os.path.exists(SNAPSHOT_DIR):
+                    cached_images = sorted(glob.glob(os.path.join(SNAPSHOT_DIR, '*.jpg')), key=os.path.getmtime, reverse=True)
                 
-                if not images:
-                    st.info("Chưa ghi nhận sự cố nào.", icon="📝")
-                else:
-                    st.warning(f"📸 Đã lưu {len(images)} hồ sơ sự cố:")
-                    for img_path in images:
-                        file_name = os.path.basename(img_path)
-                        display_name = file_name.replace("fall_evidence_", "").replace(".jpg", "")
-                        # FIX LỖI WARNING VÀNG: Dùng use_container_width=True
-                        st.image(img_path, caption=f"ID: {display_name}", width='content')
+                with gallery_ph.container():
+                    st.write(f"📸 **Bằng chứng ({len(cached_images)})**")
+                    if cached_images:
+                        # Chỉ hiện 3 ảnh mới nhất để đỡ lag
+                        cols = st.columns(3)
+                        for idx, img_path in enumerate(cached_images[:3]):
+                            cols[idx].image(img_path, caption=os.path.basename(img_path))
 
-    cap.release()
-    st.success("Đã kết thúc video.")
+        except queue.Empty:
+            continue
+    
+    processor.stop()
+    processor.join()
+    st.success("Kết thúc video.")
 
 elif stop_btn:
-    st.write("Đã dừng hệ thống.")
+    st.session_state['stop_thread'] = True
+    st.write("Hệ thống đã dừng.")
 else:
-    col_video.info("👈 Chọn video để bắt đầu.")
+    st.info("👈 Chọn video để bắt đầu.")
