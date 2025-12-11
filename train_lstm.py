@@ -25,18 +25,20 @@ print(f"Train shape: {X_train.shape}, Test shape: {X_test.shape}")
 # --- XÂY DỰNG MODEL LSTM ---
 model = Sequential()
 
-# Input Shape: (30 frames, 34 keypoints)
+# Input Shape: (15 frames, 34 keypoints)
 # Bidirectional LSTM giúp học ngữ cảnh 2 chiều (quá khứ <-> tương lai trong window)
+# Kiến trúc nhẹ hơn, phù hợp với data ít
 model = Sequential()
-model.add(Input(shape=(30, 34))) # Khai báo Input riêng
-model.add(Bidirectional(LSTM(64, return_sequences=True)))
-model.add(Dropout(0.2))
+model.add(Input(shape=(X_train.shape[1], X_train.shape[2])))
 
-model.add(LSTM(64, return_sequences=False))
-model.add(Dropout(0.2))
+# Chỉ dùng 1 lớp LSTM nhưng tăng nhẹ unit lên
+model.add(Bidirectional(LSTM(64, return_sequences=False))) 
+model.add(Dropout(0.4)) # Tăng Dropout để model bớt "học vẹt"
 
 model.add(Dense(32, activation='relu'))
-model.add(Dense(2, activation='softmax')) # 2 output: Normal, Fall
+model.add(Dropout(0.4))
+
+model.add(Dense(2, activation='softmax'))
 
 model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
@@ -45,7 +47,7 @@ print("🚀 Bắt đầu training...")
 history = model.fit(
     X_train, y_train,
     epochs=50,             # Số lần học
-    batch_size=32,
+    batch_size=24,
     validation_data=(X_test, y_test)
 )
 

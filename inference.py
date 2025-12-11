@@ -45,7 +45,7 @@ class FallDetector:
         # QUẢN LÝ TRẠNG THÁI (State Management)
         # Dictionary lưu lịch sử keypoints cho từng ID: { track_id: deque(maxlen=30) }
         self.track_history = {} 
-        self.SEQUENCE_LENGTH = 30
+        self.SEQUENCE_LENGTH = 15
         
         # Quản lý việc hiển thị cảnh báo (giữ cảnh báo trong vài giây để dễ nhìn)
         self.alert_buffer = {} 
