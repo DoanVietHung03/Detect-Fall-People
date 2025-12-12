@@ -41,38 +41,45 @@ class VideoProcessor(threading.Thread):
         self.detector = None
 
     def run(self):
-        # Khởi tạo model trong luồng riêng để tránh lag UI
+        # Khởi tạo model
         self.detector = FallDetector(conf_threshold=self.conf_thresh, lstm_threshold=self.lstm_thresh)
         cap = cv2.VideoCapture(self.video_path)
         
+        # 1. LẤY FPS GỐC CỦA VIDEO
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps == 0 or fps is None: 
+            fps = 30 # Fallback nếu không đọc được
+        
+        frame_duration = 1.0 / fps # Ví dụ 30fps -> 0.033s mỗi frame
+
+        SKIP_FRAMES = 0 # Không skip frame nữa
         frame_idx = 0
-        # SKIP_FRAMES = 2 # Xử lý 1 frame, bỏ qua 2 frame (Tăng tốc)
 
         while not self.stopped and cap.isOpened():
+            start_time = time.time() # <--- BẤM GIỜ BẮT ĐẦU
+
             ret, frame = cap.read()
-            if not ret:
-                break
+            if not ret: break
             
             frame_idx += 1
-            # if frame_idx % (SKIP_FRAMES + 1) != 0:
-            #     continue
+            if SKIP_FRAMES > 0 and frame_idx % (SKIP_FRAMES + 1) != 0:
+                continue
 
-            # 1. Resize ảnh để tăng tốc Inference (Quan trọng!)
-            # YOLO chuẩn là 640, nếu đưa 1080p vào sẽ rất chậm
+            # Resize
             h, w = frame.shape[:2]
-            scale = 640 / w
-            new_h = int(h * scale)
-            resized_frame = cv2.resize(frame, (640, new_h))
+            if w > 640:
+                scale = 640 / w
+                new_h = int(h * scale)
+                resized_frame = cv2.resize(frame, (640, new_h))
+            else:
+                resized_frame = frame
 
-            # 2. Cập nhật ngưỡng (nếu user đổi slider)
+            # Update threshold & Process
             self.detector.conf_threshold = self.conf_thresh
             self.detector.lstm_threshold = self.lstm_thresh
-
-            # 3. Chạy AI
             processed_frame, fall_count, snap_dir = self.detector.process_frame(resized_frame)
 
-            # 4. Đẩy kết quả vào hàng đợi (Queue)
-            # Xóa cũ nếu đầy để luôn lấy frame mới nhất (Real-time)
+            # Put to Queue
             if self.result_queue.full():
                 try: self.result_queue.get_nowait()
                 except queue.Empty: pass
@@ -81,9 +88,17 @@ class VideoProcessor(threading.Thread):
                 'frame': processed_frame,
                 'fall_count': fall_count,
                 'snap_dir': snap_dir,
-                'has_new_fall': fall_count > 0 # Cờ báo hiệu có ngã để UI update gallery
+                'has_new_fall': fall_count > 0
             })
             
+            # 2. LOGIC ĐỒNG BỘ TỐC ĐỘ (SYNC FPS)
+            # Tính thời gian đã trôi qua cho việc xử lý frame này
+            processing_time = time.time() - start_time
+            
+            # Nếu xử lý quá nhanh (nhanh hơn thời gian thực của frame), thì ngủ một chút
+            if processing_time < frame_duration:
+                time.sleep(frame_duration - processing_time)
+
         cap.release()
         self.stopped = True
 
