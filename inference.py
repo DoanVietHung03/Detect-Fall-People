@@ -9,26 +9,7 @@ from ultralytics import YOLO
 from supervision import ByteTrack, Detections, BoxAnnotator, LabelAnnotator, ColorPalette, Color
 
 from config import DEVICE
-        
-# --- CLASS MODEL (Phải giống hệt lúc Train) ---
-class FallLSTM(nn.Module):
-    def __init__(self, input_size=34, hidden_size=64, num_classes=2):
-        super(FallLSTM, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True, bidirectional=True)
-        self.dropout = nn.Dropout(0.4)
-        self.fc1 = nn.Linear(hidden_size * 2, 32)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(32, num_classes)
-
-    def forward(self, x):
-        out, (h_n, c_n) = self.lstm(x)
-        x = torch.cat((h_n[-2,:,:], h_n[-1,:,:]), dim=1)
-        x = self.dropout(x)
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        return x
+from train_lstm import FallLSTM
 
 class FallDetector:
     def __init__(self, model_pose='weights/yolo11s-pose.pt', model_lstm='weights/lstm_fall_model.pth', conf_threshold=0.8, lstm_threshold=0.75):
@@ -58,7 +39,7 @@ class FallDetector:
         # QUẢN LÝ TRẠNG THÁI (State Management)
         # Dictionary lưu lịch sử keypoints cho từng ID: { track_id: deque(maxlen=30) }
         self.track_history = {} 
-        self.SEQUENCE_LENGTH = 15
+        self.SEQUENCE_LENGTH = 30
         
         # Quản lý việc hiển thị cảnh báo (giữ cảnh báo trong vài giây để dễ nhìn)
         self.alert_buffer = {} 

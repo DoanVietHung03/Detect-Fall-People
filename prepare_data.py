@@ -13,7 +13,7 @@ DATASET_ROOT = "Dataset"
 CSV_FALLS = "urfall-cam0-falls.csv"
 CSV_ADLS = "urfall-cam0-adls.csv"
 
-SEQUENCE_LENGTH = 15
+SEQUENCE_LENGTH = 30
 STEP_SIZE = 5  # Giảm step size để lấy được nhiều mẫu ngã hơn
 MODEL_PATH = 'yolo11s-pose.pt'
 

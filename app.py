@@ -1,4 +1,5 @@
 import streamlit as st
+import numpy as np
 import cv2
 import os
 import glob
@@ -10,7 +11,7 @@ import time
 from inference import FallDetector
 
 # --- CẤU HÌNH ---
-st.set_page_config(page_title="Hệ thống Phát hiện Ngã (Optimized)", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Hệ thống Phát hiện Ngã", layout="wide", page_icon="⚡")
 VIDEO_DIR = "samples"
 SNAPSHOT_DIR = "snapshots"
 
@@ -73,11 +74,17 @@ class VideoProcessor(threading.Thread):
                 resized_frame = cv2.resize(frame, (640, new_h))
             else:
                 resized_frame = frame
+              
+            # Tăng độ tương phản (Gamma Correction)  
+            gamma = 1.8 # Thử chỉnh từ 1.2 đến 2.0
+            invGamma = 1.0 / gamma
+            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            enhanced_frame = cv2.LUT(resized_frame, table)
 
             # Update threshold & Process
             self.detector.conf_threshold = self.conf_thresh
             self.detector.lstm_threshold = self.lstm_thresh
-            processed_frame, fall_count, snap_dir = self.detector.process_frame(resized_frame)
+            processed_frame, fall_count, snap_dir = self.detector.process_frame(enhanced_frame)
 
             # Put to Queue
             if self.result_queue.full():
@@ -119,8 +126,8 @@ def get_video_files():
 # ================= SIDEBAR =================
 with st.sidebar:
     st.header("⚡ Cấu hình & Tối ưu")
-    conf_thresh = st.slider("Confidence YOLO", 0.3, 1.0, 0.85) 
-    lstm_thresh = st.slider("Ngưỡng LSTM", 0.5, 0.99, 0.75)
+    conf_thresh = st.slider("Confidence YOLO", 0.3, 1.0, 0.8) 
+    lstm_thresh = st.slider("Ngưỡng LSTM", 0.5, 0.99, 0.7)
     
     st.divider()
     st.subheader("Video")

@@ -52,14 +52,11 @@ if __name__ == "__main__":
     # Tạo DataLoader
     train_dataset = TensorDataset(X_train, y_train)
     test_dataset = TensorDataset(X_test, y_test)
-    train_loader = DataLoader(train_dataset, batch_size=24, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=24, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=18, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=18, shuffle=False)
 
     # --- KHỞI TẠO ---
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 Training on: {device}")
-    
-    model = FallLSTM().to(device)
+    model = FallLSTM().to(DEVICE)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
@@ -72,7 +69,7 @@ if __name__ == "__main__":
         total = 0
         
         for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
+            inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
             
             optimizer.zero_grad()
             outputs = model(inputs)
@@ -91,7 +88,7 @@ if __name__ == "__main__":
         val_total = 0
         with torch.no_grad():
             for inputs, labels in test_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
+                inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
                 outputs = model(inputs)
                 _, predicted = torch.max(outputs.data, 1)
                 val_total += labels.size(0)
