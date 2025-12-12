@@ -3,24 +3,35 @@ import cv2
 import numpy as np
 import os
 from collections import deque
+import torch
+import torch.nn as nn
 from ultralytics import YOLO
-import tensorflow as tf
-from tensorflow.keras.models import load_model
 from supervision import ByteTrack, Detections, BoxAnnotator, LabelAnnotator, ColorPalette, Color
 
 from config import DEVICE
+        
+# --- CLASS MODEL (Phải giống hệt lúc Train) ---
+class FallLSTM(nn.Module):
+    def __init__(self, input_size=34, hidden_size=64, num_classes=2):
+        super(FallLSTM, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True, bidirectional=True)
+        self.dropout = nn.Dropout(0.4)
+        self.fc1 = nn.Linear(hidden_size * 2, 32)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(32, num_classes)
 
-# --- FIX XUNG ĐỘT GPU ---
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-        print(e)
+    def forward(self, x):
+        out, (h_n, c_n) = self.lstm(x)
+        x = torch.cat((h_n[-2,:,:], h_n[-1,:,:]), dim=1)
+        x = self.dropout(x)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
 
 class FallDetector:
-    def __init__(self, model_pose='weights/yolo11s-pose.pt', model_lstm='weights/lstm_fall_model.h5', conf_threshold=0.8, lstm_threshold=0.75):
+    def __init__(self, model_pose='weights/yolo11s-pose.pt', model_lstm='weights/lstm_fall_model.pth', conf_threshold=0.8, lstm_threshold=0.75):
         self.conf_threshold = conf_threshold
         self.lstm_threshold = lstm_threshold
         
@@ -28,7 +39,9 @@ class FallDetector:
         print("Loading YOLO...")
         self.pose_model = YOLO(model_pose).to(DEVICE)
         print("Loading LSTM...")
-        self.lstm_model = load_model(model_lstm, compile=False)
+        self.lstm_model = FallLSTM().to(DEVICE)
+        self.lstm_model.load_state_dict(torch.load(model_lstm, map_location=DEVICE))
+        self.lstm_model.eval()
         
         # Tracker
         self.tracker = ByteTrack(track_activation_threshold=0.2, lost_track_buffer=30)
@@ -146,23 +159,20 @@ class FallDetector:
             is_fall_detected_now = False
             prob_text = ""
 
-            if matched_kps is not None:
-                # 1. Chuẩn hóa & Đẩy vào hàng đợi
-                norm_kps = self.normalize_keypoints(matched_kps, track_box)
-                self.track_history[track_id].append(norm_kps)
+            if matched_kps is not None and len(self.track_history[track_id]) == self.SEQUENCE_LENGTH:
+                # 1. Chuẩn bị Input Tensor
+                sequence = np.array([self.track_history[track_id]]) # Shape (1, 15, 34)
+                input_tensor = torch.tensor(sequence, dtype=torch.float32).to(DEVICE)
                 
-                # 2. Chỉ dự đoán khi đã gom đủ 30 frames
-                if len(self.track_history[track_id]) == self.SEQUENCE_LENGTH:
-                    # Reshape (1, 30, 34) để đưa vào model
-                    sequence = np.array([self.track_history[track_id]])
-                    
-                    # Predict
-                    pred = self.lstm_model.predict(sequence, verbose=0)[0]
-                    fall_prob = pred[1] 
-                    
-                    if fall_prob > self.lstm_threshold: # Ngưỡng chắc chắn
-                        is_fall_detected_now = True
-                        prob_text = f"({fall_prob:.2f})"
+                # 2. Inference
+                with torch.no_grad():
+                    output = self.lstm_model(input_tensor) # Logits
+                    probs = torch.softmax(output, dim=1)   # Probability
+                    fall_prob = probs[0, 1].item()         # Lấy xác suất lớp 1 (Fall)
+                
+                if fall_prob > self.lstm_threshold:
+                    is_fall_detected_now = True
+                    prob_text = f"({fall_prob:.2f})"
 
             # --- QUẢN LÝ TRẠNG THÁI CẢNH BÁO (DEBOUNCE) ---
             # Nếu phát hiện ngã -> Bật bộ đếm ngược 40 frames (giữ màu đỏ khoảng 1.5s)

@@ -46,7 +46,7 @@ class VideoProcessor(threading.Thread):
         cap = cv2.VideoCapture(self.video_path)
         
         frame_idx = 0
-        SKIP_FRAMES = 2 # Xử lý 1 frame, bỏ qua 2 frame (Tăng tốc)
+        # SKIP_FRAMES = 2 # Xử lý 1 frame, bỏ qua 2 frame (Tăng tốc)
 
         while not self.stopped and cap.isOpened():
             ret, frame = cap.read()
@@ -54,8 +54,8 @@ class VideoProcessor(threading.Thread):
                 break
             
             frame_idx += 1
-            if frame_idx % (SKIP_FRAMES + 1) != 0:
-                continue
+            # if frame_idx % (SKIP_FRAMES + 1) != 0:
+            #     continue
 
             # 1. Resize ảnh để tăng tốc Inference (Quan trọng!)
             # YOLO chuẩn là 640, nếu đưa 1080p vào sẽ rất chậm
@@ -115,7 +115,7 @@ with st.sidebar:
             clear_history()
             st.rerun()
 
-    uploaded = st.file_uploader("Upload Video", type=['mp4'])
+    uploaded = st.file_uploader("Upload Video", type=['mp4', 'avi', 'mkv'])
     if uploaded:
         tfile = tempfile.NamedTemporaryFile(delete=False)
         tfile.write(uploaded.read())
