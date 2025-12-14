@@ -50,8 +50,7 @@ def update_settings(settings: Settings):
 @app.get("/status")
 def get_status():
     return {
-        "fall_detected": current_settings["fall_detected_now"],
-        "is_running": True
+        "fall_detected": current_settings["fall_detected_now"]
     }
 
 @app.get("/gallery")
