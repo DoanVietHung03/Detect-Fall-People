@@ -9,11 +9,12 @@ import glob
 import time
 from pydantic import BaseModel
 from inference import FallDetector
+from typing import List
 
 app = FastAPI()
 
 # --- CẤU HÌNH ---
-SNAPSHOT_DIR = "snapshots"
+SNAPSHOT_DIR = "../snapshots"
 if not os.path.exists(SNAPSHOT_DIR): os.makedirs(SNAPSHOT_DIR)
 
 # Mount thư mục ảnh để Dashboard có thể xem qua URL
@@ -23,20 +24,36 @@ app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
 current_settings = {
     "conf": 0.7,
     "lstm": 0.7,
-    "fall_detected_now": False # Trạng thái tức thời để dashboard cảnh báo
+    "fall_detected_now": False 
 }
+
+# Model dữ liệu cho vùng an toàn
+class ZoneConfig(BaseModel):
+    zones: List[List[List[int]]]
 
 # Khởi tạo model
 print("⏳ Đang tải model AI...")
 detector = FallDetector(
-    model_pose='weights/yolo11m-pose.pt',
-    model_lstm='weights/lstm_fall_model.pth'
+    model_pose='../weights/yolo11m-pose.pt',
+    model_lstm='../weights/lstm_fall_model.pth'
 )
 print("✅ AI đã sẵn sàng!")
 
 class Settings(BaseModel):
     conf: float
     lstm: float
+    
+@app.post("/update_zones")
+def update_zones(config: ZoneConfig):
+    try:
+        new_zones = []
+        for polygon in config.zones:
+            pts = np.array(polygon, np.int32)
+            new_zones.append(pts)
+        detector.set_safe_zones(new_zones)
+        return {"status": "success", "count": len(new_zones)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.post("/update_settings")
 def update_settings(settings: Settings):
@@ -55,20 +72,27 @@ def get_status():
 
 @app.get("/gallery")
 def get_gallery(video_name: str):
-    """API trả về ảnh của riêng video đó"""
     specific_dir = os.path.join(SNAPSHOT_DIR, video_name)
     if not os.path.exists(specific_dir):
         return {"images": []}
     
-    # Lấy danh sách ảnh, sắp xếp mới nhất lên đầu
+    # Lấy danh sách ảnh, sắp xếp mới nhất lên đầu (theo thời gian sửa đổi)
     files = sorted(glob.glob(os.path.join(specific_dir, "*.jpg")), key=os.path.getmtime, reverse=True)
     
-    # Trả về đường dẫn tương đối: video_name/anh.jpg
-    # Chỉ lấy 4 ảnh mới nhất để Dashboard đỡ lag
-    rel_paths = [os.path.join(video_name, os.path.basename(f)).replace("\\", "/") for f in files[:4]]
+    rel_paths = [os.path.join(video_name, os.path.basename(f)).replace("\\", "/") for f in files[:6]]
     return {"images": rel_paths}
 
-# --- LOGIC XỬ LÝ VIDEO & BEST SHOT ---
+# --- HÀM LƯU ẢNH ---
+def save_evidence(frame, score, folder_path, prefix="fall"):
+    if frame is None: return
+    timestamp = int(time.time())
+    # Tạo tên file bao gồm score để dễ debug
+    filename = f"{prefix}_{int(score*100)}conf_{timestamp}.jpg"
+    full_path = os.path.join(folder_path, filename)
+    cv2.imwrite(full_path, frame)
+    print(f"📸 Saved Evidence: {full_path} (Score: {score:.2f})")
+
+# --- LOGIC XỬ LÝ VIDEO ---
 def generate_frames(video_path):
     cap = cv2.VideoCapture(video_path)
     
@@ -78,51 +102,58 @@ def generate_frames(video_path):
     save_path = os.path.join(SNAPSHOT_DIR, video_name_only)
     if not os.path.exists(save_path): os.makedirs(save_path)
 
-    # 2. Biến theo dõi logic "Best Shot"
     best_frame = None       
     max_score = 0.0         
     is_falling_sequence = False 
+    
+    # Biến để kiểm soát việc lưu (tránh lưu quá nhiều trùng lặp)
+    last_saved_time = 0 
 
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret: break
+        if not ret: 
+            break # Video kết thúc
         
         # Resize nhẹ 
         frame = cv2.resize(frame, (640, 480))
         
         # --- GỌI AI ---
-        # Nhận về: Frame đã vẽ, số người ngã, và ĐIỂM SỐ (score)
         processed_frame, fall_count, score = detector.process_frame(frame)
-        
-        # Cập nhật trạng thái global cho Dashboard biết ngay lập tức
         current_settings["fall_detected_now"] = (fall_count > 0)
 
-        # --- LOGIC TÌM ẢNH TỐT NHẤT (BEST SHOT) ---
+        # --- LOGIC BEST SHOT (ĐÃ SỬA) ---
         if fall_count > 0:
-            # A. ĐANG TRONG QUÁ TRÌNH NGÃ
-            is_falling_sequence = True
+            current_time = time.time()
             
-            # Nếu khung hình này rõ hơn (score cao hơn) -> Lưu tạm vào RAM
+            # Nếu là bắt đầu sequence mới
+            if not is_falling_sequence:
+                is_falling_sequence = True
+                max_score = 0.0
+                best_frame = None
+                print("⚠️ Fall Started - Tracking best shot...")
+
+            # Cập nhật khung hình tốt nhất nếu điểm cao hơn
             if score >= max_score:
                 max_score = score
-                best_frame = processed_frame.copy() 
-            
-        else:
-            # B. HẾT NGÃ (Hoặc người vừa đứng dậy / chuyển cảnh)
-            if is_falling_sequence:
-                # Kết thúc sự kiện -> LƯU ẢNH TỐT NHẤT xuông ổ cứng
-                if best_frame is not None:
-                    timestamp = int(time.time())
-                    filename = f"fall_{int(max_score*100)}conf_{timestamp}.jpg"
-                    full_path = os.path.join(save_path, filename)
-                    
-                    cv2.imwrite(full_path, best_frame)
-                    print(f"📸 Saved Evidence: {full_path} (Score: {max_score:.2f})")
+                best_frame = processed_frame.copy()
                 
-                # Reset biến để chờ cú ngã tiếp theo
+                # OPTIONAL: Lưu ngay lập tức nếu score rất cao (>0.85) để hiển thị ngay trên Dashboard
+                # Thay vì chờ ngã xong mới hiện.
+                if max_score > 0.85 and (current_time - last_saved_time > 1.0):
+                    save_evidence(best_frame, max_score, save_path)
+                    last_saved_time = current_time
+
+        else:
+            # Người đã đứng dậy hoặc hết ngã
+            if is_falling_sequence:
+                print("✅ Fall Sequence Ended. Saving final best shot.")
+                # Lưu cái tốt nhất còn lại trong sequence
+                save_evidence(best_frame, max_score, save_path)
+                
+                # Reset
+                is_falling_sequence = False
                 best_frame = None
                 max_score = 0.0
-                is_falling_sequence = False
 
         # Encode frame gửi về Client
         ret, buffer = cv2.imencode('.jpg', processed_frame)
@@ -130,6 +161,12 @@ def generate_frames(video_path):
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
     
+    # --- QUAN TRỌNG: XỬ LÝ KHI LOOP KẾT THÚC (Video hết) ---
+    # Nếu video hết mà vẫn đang trong trạng thái ngã -> LƯU NGAY
+    if is_falling_sequence and best_frame is not None:
+        print("⏹️ Video Ended during fall. Saving pending evidence.")
+        save_evidence(best_frame, max_score, save_path)
+
     cap.release()
 
 @app.get("/video_feed")
@@ -140,4 +177,5 @@ def video_feed(video_path: str):
     )
 
 if __name__ == "__main__":
+    import numpy as np # Import thêm ở đây nếu chưa có global import
     uvicorn.run(app, host="0.0.0.0", port=8000)
