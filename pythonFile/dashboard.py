@@ -141,11 +141,7 @@ with tab_mon:
         else:
             st.info("Please select a valid video from the sidebar.", icon="👈")
 
-    with col_info:
-        # Chỉ auto refresh khi đang Play để tiết kiệm tài nguyên
-        if st.session_state.is_playing:
-            st_autorefresh(interval=2000, limit=None, key="status_refresher")
-        
+    with col_info:    
         st.subheader("Status")
         status_ph = st.empty()
         st.divider()
@@ -154,6 +150,7 @@ with tab_mon:
 
         # Logic hiển thị trạng thái và ảnh
         if st.session_state.is_playing:
+            st_autorefresh(interval=3000, limit=None, key="status_refresher")
             try:
                 status_res = requests.get(f"{API_URL}/status", timeout=0.5).json()
                 with status_ph.container():
@@ -161,7 +158,16 @@ with tab_mon:
                         st.error("🚨 FALL DETECTED!", icon="⚠️")
                     else:
                         st.success("✅ Safe Area", icon="🛡️")
+                        
+                # Kiểm tra: Dashboard đang Play NHƯNG Server báo đã tắt (is_active = False)
+                is_server_active = status_res.get("is_active", False)
 
+                if not is_server_active:
+                    # Để tránh trường hợp vừa bấm Start server chưa kịp bật True
+                    # Ta có thể check thêm hoặc chấp nhận độ trễ của autorefresh (2s là đủ để server start)
+                    st.session_state.is_playing = False
+                    st.rerun()
+                    
                 if selected_video_name:
                     current_video_key = os.path.splitext(selected_video_name)[0]
                     gallery_res = requests.get(f"{API_URL}/gallery", params={"video_name": current_video_key}, timeout=0.5).json()

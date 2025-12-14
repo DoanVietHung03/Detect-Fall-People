@@ -70,7 +70,7 @@ class FallDetector:
         
         # --- NEW: LOGIC BUSINESS ---
         self.fall_start_times = {}  # Lưu thời điểm bắt đầu ngã của từng ID: {id: timestamp}
-        self.CONFIRM_DELAY = 3.0    # Cần nằm im 3 giây mới báo động
+        self.CONFIRM_DELAY = 2.0    # Cần nằm im 2 giây mới báo động
         
         # Safe Zones: List các đa giác (polygon). Ví dụ hardcode 1 vùng (bạn có thể truyền từ ngoài vào)
         # Cấu trúc: [np.array([[x1,y1], [x2,y2], ...], np.int32)]

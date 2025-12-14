@@ -24,7 +24,8 @@ app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
 current_settings = {
     "conf": 0.7,
     "lstm": 0.7,
-    "fall_detected_now": False 
+    "fall_detected_now": False,
+    "is_active": False
 }
 
 # Model dữ liệu cho vùng an toàn
@@ -67,7 +68,8 @@ def update_settings(settings: Settings):
 @app.get("/status")
 def get_status():
     return {
-        "fall_detected": current_settings["fall_detected_now"]
+        "fall_detected": current_settings["fall_detected_now"],
+        "is_active": current_settings["is_active"]
     }
 
 @app.get("/gallery")
@@ -82,6 +84,22 @@ def get_gallery(video_name: str):
     rel_paths = [os.path.join(video_name, os.path.basename(f)).replace("\\", "/") for f in files[:6]]
     return {"images": rel_paths}
 
+# --- HÀM DỌN DẸP ẢNH CŨ ---
+def cleanup_old_files(folder_path, max_files=50):
+    """Xóa bớt ảnh cũ nếu vượt quá số lượng cho phép"""
+    try:
+        files = glob.glob(os.path.join(folder_path, "*.jpg"))
+        if len(files) > max_files:
+            # Sắp xếp theo thời gian (cũ nhất đứng đầu)
+            files.sort(key=os.path.getmtime)
+            # Số lượng cần xóa
+            num_to_delete = len(files) - max_files
+            for f in files[:num_to_delete]:
+                os.remove(f)
+            print(f"🧹 Cleaned up {num_to_delete} old images.")
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
 # --- HÀM LƯU ẢNH ---
 def save_evidence(frame, score, folder_path, prefix="fall"):
     if frame is None: return
@@ -91,9 +109,11 @@ def save_evidence(frame, score, folder_path, prefix="fall"):
     full_path = os.path.join(folder_path, filename)
     cv2.imwrite(full_path, frame)
     print(f"📸 Saved Evidence: {full_path} (Score: {score:.2f})")
+    cleanup_old_files(folder_path, max_files=100)
 
 # --- LOGIC XỬ LÝ VIDEO ---
 def generate_frames(video_path):
+    current_settings["is_active"] = True
     cap = cv2.VideoCapture(video_path)
     
     # 1. Tạo thư mục lưu ảnh riêng cho video này
@@ -130,6 +150,7 @@ def generate_frames(video_path):
                 is_falling_sequence = True
                 max_score = 0.0
                 best_frame = None
+                frames_saved_in_sequence = 0
                 print("⚠️ Fall Started - Tracking best shot...")
 
             # Cập nhật khung hình tốt nhất nếu điểm cao hơn
@@ -139,9 +160,10 @@ def generate_frames(video_path):
                 
                 # OPTIONAL: Lưu ngay lập tức nếu score rất cao (>0.85) để hiển thị ngay trên Dashboard
                 # Thay vì chờ ngã xong mới hiện.
-                if max_score > 0.85 and (current_time - last_saved_time > 1.0):
+                if max_score > 0.85 and (current_time - last_saved_time > 5.0) and frames_saved_in_sequence < 3:
                     save_evidence(best_frame, max_score, save_path)
                     last_saved_time = current_time
+                    frames_saved_in_sequence += 1
 
         else:
             # Người đã đứng dậy hoặc hết ngã
@@ -163,6 +185,7 @@ def generate_frames(video_path):
     
     # --- QUAN TRỌNG: XỬ LÝ KHI LOOP KẾT THÚC (Video hết) ---
     # Nếu video hết mà vẫn đang trong trạng thái ngã -> LƯU NGAY
+    current_settings["is_active"] = False
     if is_falling_sequence and best_frame is not None:
         print("⏹️ Video Ended during fall. Saving pending evidence.")
         save_evidence(best_frame, max_score, save_path)
