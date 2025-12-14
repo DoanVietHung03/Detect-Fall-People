@@ -133,15 +133,15 @@ class FallDetector:
         return normalized
 
     def is_in_safe_zone(self, box):
-        """Kiểm tra xem trung tâm bounding box có nằm trong vùng an toàn không"""
         if not self.safe_zones: return False
-        
+
+        # Lấy trọng tâm (Center) thay vì chân
         cx = int((box[0] + box[2]) / 2)
-        cy = int(box[3]) # Lấy điểm chân (chạm đất) hoặc lấy trọng tâm box[1]+box[3]/2
+        cy = int((box[1] + box[3]) / 2) 
         center_point = (cx, cy)
 
         for zone in self.safe_zones:
-            # pointPolygonTest: >0 (inside), <0 (outside), =0 (edge)
+            # Sử dụng pointPolygonTest để kiểm tra điểm nằm trong đa giác
             if cv2.pointPolygonTest(zone, center_point, False) >= 0:
                 return True
         return False
