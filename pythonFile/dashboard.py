@@ -16,20 +16,20 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📹 Hệ thống Giám sát Thông minh (Client-Server)")
+st.title("📹 Smart Surveillance Center (Client-Server)")
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Thiết lập Camera")
+    st.header("⚙️ Camera Configuration")
     
     # Quét file video
     video_folder = "samples"
     if not os.path.exists(video_folder): os.makedirs(video_folder)
     video_files = [f for f in os.listdir(video_folder) if f.endswith(('.mp4', '.avi', '.mkv'))]
-    selected_video = st.selectbox("Chọn Nguồn Video", video_files)
+    selected_video = st.selectbox("Video Source", video_files)
 
     st.divider()
-    st.header("🎛️ Tham số AI")
+    st.header("🎛️ Parameters Config")
     
     # State giữ giá trị slider
     if 'conf' not in st.session_state: st.session_state.conf = 0.7
@@ -40,12 +40,12 @@ with st.sidebar:
         try:
             payload = {"conf": st.session_state.conf, "lstm": st.session_state.lstm}
             requests.post(f"{API_URL}/update_settings", json=payload, timeout=1)
-            st.toast("Đã cập nhật cấu hình AI!", icon="✅")
+            st.toast("Basic settings updated!", icon="✅")
         except:
-            st.toast("Lỗi kết nối Server!", icon="❌")
+            st.toast("Server Connection Failed!", icon="❌")
 
-    conf = st.slider("Độ tin cậy YOLO", 0.1, 1.0, key="conf", on_change=on_change_settings)
-    lstm = st.slider("Ngưỡng Ngã (LSTM)", 0.1, 1.0, key="lstm", on_change=on_change_settings)
+    conf = st.slider("YOLO Confidence", 0.1, 1.0, key="conf", on_change=on_change_settings)
+    lstm = st.slider("Fall Threshold (LSTM)", 0.1, 1.0, key="lstm", on_change=on_change_settings)
 
 # --- MAIN UI ---
 col_video, col_info = st.columns([3, 1.2])
@@ -65,17 +65,17 @@ with col_video:
             unsafe_allow_html=True
         )
     else:
-        st.info("Vui lòng chọn video ở menu bên trái.")
+        st.info("No video files found in 'samples' folder.", icon="i️")
 
 with col_info:
     # 1. AUTO REFRESH LOGIC (Chạy mỗi 2 giây)
     st_autorefresh(interval=2000, limit=None, key="status_refresher")
 
-    st.subheader("📡 Trạng thái")
+    st.subheader("📡 Status")
     status_ph = st.empty()
     
     st.divider()
-    st.subheader("📸 Bằng chứng (Mới nhất)")
+    st.subheader("📸 Evidence (Latest)")
     gallery_ph = st.empty()
 
     # --- LOGIC GỌI API NGẦM ---
@@ -84,9 +84,9 @@ with col_info:
         status_res = requests.get(f"{API_URL}/status", timeout=0.5).json()
         with status_ph.container():
             if status_res.get("fall_detected"):
-                st.error("🚨 CẢNH BÁO: CÓ NGƯỜI NGÃ!", icon="⚠️")
+                st.error("🚨 WARNING: FALL DETECTED!", icon="⚠️")
             else:
-                st.success("✅ Khu vực an toàn", icon="🛡️")
+                st.success("✅ Safe Area", icon="🛡️")
 
         # B. Lấy Gallery (Chỉ của video đang chọn)
         if selected_video:
@@ -102,16 +102,16 @@ with col_info:
             
             with gallery_ph.container():
                 if not images:
-                    st.info("Chưa có sự kiện nào.")
+                    st.info("No events captured yet.")
                 else:
-                    # Hiển thị lưới 2 cột
+                    # Display in a 2-column grid
                     cols = st.columns(2)
                     for idx, img_rel_path in enumerate(images):
-                        # URL ảnh hoàn chỉnh
+                        # Full image URL
                         img_url = f"{API_URL}/snapshots/{img_rel_path}"
                         # caption ngắn gọn
                         caption = img_rel_path.split("/")[-1] 
                         cols[idx % 2].image(img_url, caption=caption, width='stretch')
 
     except Exception:
-        status_ph.warning("Đang kết nối tới AI Server...")
+        status_ph.warning("Connecting to AI Server...")

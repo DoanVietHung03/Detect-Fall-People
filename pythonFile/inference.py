@@ -32,7 +32,7 @@ class FallLSTM(nn.Module):
 
 # --- 2. CLASS HYBRID DETECTOR ---
 class FallDetector:
-    def __init__(self, model_pose='weights/yolo11s-pose.pt', model_lstm='weights/lstm_fall_model.pth', conf_threshold=0.85, lstm_threshold=0.75):
+    def __init__(self, model_pose='../weights/yolo11m-pose.pt', model_lstm='../weights/lstm_fall_model.pth', conf_threshold=0.7, lstm_threshold=0.7):
         self.conf_threshold = conf_threshold
         self.lstm_threshold = lstm_threshold
         self.device = torch.device(DEVICE)
@@ -45,14 +45,14 @@ class FallDetector:
         if os.path.exists(model_lstm):
             self.lstm_model.load_state_dict(torch.load(model_lstm, map_location=self.device))
         else:
-            print("⚠️ Cảnh báo: Không tìm thấy weight LSTM.")
+            print("⚠️ Warning: LSTM model file not found!")
         self.lstm_model.eval()
 
         self.tracker = ByteTrack(track_activation_threshold=0.2, lost_track_buffer=45)
 
         self.box_annotator_green = BoxAnnotator(color=ColorPalette([Color.GREEN]), thickness=2)
         self.label_annotator_green = LabelAnnotator(text_color=Color.BLACK, text_scale=0.5)
-        self.box_annotator_red = BoxAnnotator(color=ColorPalette([Color.RED]), thickness=3)
+        self.box_annotator_red = BoxAnnotator(color=ColorPalette([Color.RED]), thickness=2)
         self.label_annotator_red = LabelAnnotator(text_color=Color.WHITE, text_scale=0.5)
 
         self.track_history = {} 
@@ -61,7 +61,7 @@ class FallDetector:
         
         self.last_valid_pose = {}
 
-    # ================== CÁC HÀM RULE-BASED ==================
+    # ================== RULE-BASED FUNCTIONS ===================
     def calculate_aspect_ratio(self, box):
         w = box[2] - box[0]
         h = box[3] - box[1]
@@ -204,7 +204,7 @@ class FallDetector:
             
             # 1. RULE RÕ RÀNG
             if has_pose:
-                if spine_angle < 30: 
+                if spine_angle < 15: 
                     if not legs_standing: 
                         is_fall = True
                         reason = f"R:LayFlat({int(spine_angle)})"
