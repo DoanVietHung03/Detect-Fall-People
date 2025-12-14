@@ -134,7 +134,7 @@ with tab_mon:
                 cap.release()
                 if ret:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    st.image(frame, caption="Video Preview (Click Start to Analyze)", width='stretch')
+                    st.image(frame, caption="Video Preview (Click Start to Analyze)", use_container_width=True)
                 else:
                     st.warning("Cannot read video file.")
 
@@ -168,17 +168,20 @@ with tab_mon:
                     st.session_state.is_playing = False
                     st.rerun()
                     
-                if selected_video_name:
-                    current_video_key = os.path.splitext(selected_video_name)[0]
-                    gallery_res = requests.get(f"{API_URL}/gallery", params={"video_name": current_video_key}, timeout=0.5).json()
-                    images = gallery_res.get("images", [])
-                    with gallery_ph.container():
-                        if not images: st.info("No events.")
-                        else:
-                            cols = st.columns(2)
-                            for idx, img_rel_path in enumerate(images):
-                                img_url = f"{API_URL}/snapshots/{img_rel_path}"
-                                cols[idx % 2].image(img_url, caption=img_rel_path.split("/")[-1], width='stretch')
+                try:
+                    if selected_video_name:
+                        current_video_key = os.path.splitext(selected_video_name)[0]
+                        gallery_res = requests.get(f"{API_URL}/gallery", params={"video_name": current_video_key}, timeout=0.5).json()
+                        images = gallery_res.get("images", [])
+                        with gallery_ph.container():
+                            if not images: st.info("No events.")
+                            else:
+                                cols = st.columns(2)
+                                for idx, img_rel_path in enumerate(images):
+                                    img_url = f"{API_URL}/snapshots/{img_rel_path}"
+                                    cols[idx % 2].image(img_url, caption=img_rel_path.split("/")[-1], use_container_width=True)
+                except Exception as e:
+                    print(f"Gallery fetch error: {e}")
             except:
                 status_ph.warning("Connecting to Server...")
         else:
@@ -187,7 +190,7 @@ with tab_mon:
 
 # === TAB 2: ZONE CONFIG ===
 with tab_zone:
-    st.info("💡 Instructions: Draw safe zones (e.g., bed, sofa) over the image. AI will NOT trigger alarms in these zones.", icon="💡")
+    st.info("Instructions: Draw safe zones (e.g., bed, sofa) over the image. AI will NOT trigger alarms in these zones.", icon="💡")
     
     col_draw, col_ctrl = st.columns([3, 1])
     
@@ -205,6 +208,7 @@ with tab_zone:
         if bg_image:
             # --- TRY-EXCEPT ĐỂ XỬ LÝ LỖI PHIÊN BẢN THƯ VIỆN ---
             try:
+                cv2.waitKey(0)
                 canvas_result = st_canvas(
                     fill_color="rgba(0, 255, 0, 0.3)",
                     stroke_width=2,
@@ -217,7 +221,7 @@ with tab_zone:
                     key="canvas",
                 )
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Error drawing canvas: {e}")
                 canvas_result = None
         else:
             st.warning("Please select a valid video to load the frame for zone setup.", icon="👈")
