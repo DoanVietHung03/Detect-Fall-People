@@ -77,7 +77,7 @@ with tab_mon:
     col_video, col_info = st.columns([3, 1.2])
     
     with col_video:
-        if selected_video_path and os.path.exists(selected_video_path):
+        if selected_video_path and (os.path.exists(selected_video_path) or "rtsp://" in selected_video_path):
             
             # --- LOGIC NÚT BẤM START/STOP ---
             if st.session_state.is_playing:
@@ -168,7 +168,7 @@ with tab_zone:
     col_draw, col_ctrl = st.columns([3, 1])
     
     bg_image = None
-    if selected_video_path and os.path.exists(selected_video_path):
+    if selected_video_path and (os.path.exists(selected_video_path) or "rtsp://" in selected_video_path):
         cap = cv2.VideoCapture(selected_video_path)
         ret, frame = cap.read()
         if ret:

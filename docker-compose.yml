@@ -31,6 +31,7 @@ services:
     command: uvicorn pythonFile.api_server:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
+      - "8501:8501"
     volumes:
       - ./snapshots:/app/snapshots
       - ./weights:/app/weights
@@ -51,10 +52,9 @@ services:
     depends_on:
       - api
     command: streamlit run pythonFile/dashboard.py
-    ports:
-      - "8501:8501"
+    network_mode: service:api
     environment:
-      - API_URL=http://api:8000
+      - API_URL=http://localhost:8000
     volumes:
       - ./snapshots:/app/snapshots
     restart: always
