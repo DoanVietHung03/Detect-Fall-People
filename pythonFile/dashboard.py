@@ -32,50 +32,23 @@ if 'selected_video_path_prev' not in st.session_state:
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Camera Configuration")
+    st.header("⚙️ Camera Selection")
     
-    # --- LOGIC MỚI: DUYỆT CÂY THƯ MỤC ---
-    # Lưu ý: Chỉnh lại đường dẫn nếu thư mục samples nằm ở chỗ khác
-    # Dựa theo ảnh bạn gửi, nếu chạy code từ thư mục cha thì là "samples"
-    base_folder = "samples" 
+    # Định nghĩa danh sách Camera (Kết nối tới tên service trong Docker)
+    CAMERA_LIST = {
+        "☕ Coffee Room Cam": "rtsp://rtsp-server:8554/cam_coffee",
+        "🏠 Home Cam 01": "rtsp://rtsp-server:8554/cam_home"
+    }
+
+    # Chọn Camera thay vì chọn Folder/File
+    selected_cam_name = st.selectbox("Select Active Camera", list(CAMERA_LIST.keys()))
     
-    if not os.path.exists(base_folder): 
-        # Fallback: Thử tìm ở thư mục cha nếu đang chạy trong thư mục con
-        if os.path.exists("../samples"):
-            base_folder = "../samples"
-        else:
-            os.makedirs(base_folder)
+    # Lấy đường dẫn RTSP tương ứng
+    selected_video_path = CAMERA_LIST[selected_cam_name]
+    selected_video_name = selected_cam_name # Dùng tên hiển thị để đặt tên folder snapshot
 
-    # 1. Lấy danh sách các thư mục con (Coffee_room, Home_01...)
-    sub_folders = [d for d in os.listdir(base_folder) if os.path.isdir(os.path.join(base_folder, d))]
-    
-    selected_video_path = None # Biến lưu đường dẫn cuối cùng
-    selected_video_name = None
-
-    if sub_folders:
-        # Chọn Category (Thư mục)
-        selected_folder = st.selectbox("📁 Area / Folder", sub_folders)
-        
-        if selected_folder:
-            folder_path = os.path.join(base_folder, selected_folder)
-            
-            # 2. Lấy danh sách video trong thư mục đó
-            video_files = [f for f in os.listdir(folder_path) if f.endswith(('.mp4', '.avi', '.mkv'))]
-            
-            if video_files:
-                # Chọn Video
-                selected_file = st.selectbox("🎬 Select Video", video_files)
-                
-                # Tạo đường dẫn đầy đủ
-                selected_video_path = os.path.join(folder_path, selected_file)
-                selected_video_name = selected_file # Tên file để hiển thị
-            else:
-                st.warning(f"No videos in '{selected_folder}'")
-    else:
-        st.error(f"No sub-folders found in '{base_folder}'!")
-
-    # Reset trạng thái Playing nếu người dùng đổi video khác
-    if selected_video_path != st.session_state.selected_video_path_prev:
+    # Reset trạng thái khi đổi cam
+    if selected_video_path != st.session_state.get('selected_video_path_prev'):
         st.session_state.is_playing = False
         st.session_state.selected_video_path_prev = selected_video_path
 

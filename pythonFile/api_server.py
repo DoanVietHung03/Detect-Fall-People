@@ -4,12 +4,17 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import cv2
 import uvicorn
-import os
 import glob
 import time
 from pydantic import BaseModel
-from inference import FallDetector
 from typing import List
+import os
+import sys
+
+# Lấy đường dẫn thư mục chứa file api_server.py và thêm vào sys.path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from inference import FallDetector
 
 app = FastAPI()
 
@@ -116,9 +121,14 @@ def generate_frames(video_path):
     current_settings["is_active"] = True
     cap = cv2.VideoCapture(video_path)
     
-    # 1. Tạo thư mục lưu ảnh riêng cho video này
-    video_filename = os.path.basename(video_path)
-    video_name_only = os.path.splitext(video_filename)[0]
+    if "rtsp://" in video_path:
+        # Lấy phần cuối của link (vd: cam_coffee) làm tên thư mục
+        video_name_only = video_path.split("/")[-1]
+    else:
+        # Logic cũ cho file
+        video_filename = os.path.basename(video_path)
+        video_name_only = os.path.splitext(video_filename)[0]
+        
     save_path = os.path.join(SNAPSHOT_DIR, video_name_only)
     if not os.path.exists(save_path): os.makedirs(save_path)
 

@@ -1,0 +1,60 @@
+services:
+  # --- 1. RTSP SERVER ---
+  rtsp-server:
+    image: bluenviron/mediamtx:latest
+    container_name: rtsp_server
+    ports:
+      - "46458:8554"  # Cổng RTSP
+    restart: always
+
+  # --- 2. CAMERA SIMULATOR (Biến file video thành luồng Camera IP) ---
+  camera_simulator:
+    image: jrottenberg/ffmpeg:4.4-ubuntu
+    container_name: camera_simulator
+    depends_on:
+      - rtsp-server
+    volumes:
+      - ./samples:/samples:ro  # Mount thư mục samples của bạn vào
+    entrypoint: ["/bin/sh", "-c"]
+    # Lệnh dưới đây sẽ giả lập 2 Camera chạy lặp lại vô tận
+    command: >
+      "ffmpeg -re -stream_loop -1 -i /samples/Coffee_room/Coffee_room_1.avi -c:v libx264 -an -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/cam_coffee
+      & ffmpeg -re -stream_loop -1 -i /samples/Home/Home_1.avi -c:v libx264 -an -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/cam_home
+      && wait"
+
+  # --- 3. AI BACKEND ---
+  api:
+    build: .
+    container_name: api_server
+    depends_on:
+      - rtsp-server # Đợi server RTSP lên trước
+    command: uvicorn pythonFile.api_server:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./snapshots:/app/snapshots
+      - ./weights:/app/weights
+    working_dir: /app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: always
+
+  # --- 4. DASHBOARD ---
+  dashboard:
+    build: .
+    container_name: fall_detection_dashboard
+    depends_on:
+      - api
+    command: streamlit run pythonFile/dashboard.py
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://api:8000
+    volumes:
+      - ./snapshots:/app/snapshots
+    restart: always

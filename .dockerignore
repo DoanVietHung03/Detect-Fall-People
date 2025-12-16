@@ -1,0 +1,19 @@
+# .dockerignore
+
+# Các file Python/Git (từ file mẫu) 
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git
+.venv
+venv
+
+# Dữ liệu/Media (từ file mẫu) 
+*.db
+*.sqlite3
+*.mp4
+
+# --- THÊM CÁC THƯ MỤC CỦA DỰ ÁN NÀY ---
+# Không cần dữ liệu training hoặc ảnh debug trong image production
+samples/
