@@ -16,10 +16,9 @@ services:
     volumes:
       - ./samples:/samples:ro  # Mount thư mục samples của bạn vào
     entrypoint: ["/bin/sh", "-c"]
-    # Lệnh dưới đây sẽ giả lập 2 Camera chạy lặp lại vô tận
     command: >
-      "ffmpeg -re -stream_loop -1 -i /samples/Coffee_room/Coffee_room_1.avi -c:v libx264 -an -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/cam_coffee
-      & ffmpeg -re -stream_loop -1 -i /samples/Home/Home_1.avi -c:v libx264 -an -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/cam_home
+      "ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /samples/cam_1.mp4 -c:v libx264 -an -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/cam_1
+      & ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /samples/cam_2.mp4 -c:v libx264 -an -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/cam_2
       && wait"
 
   # --- 3. AI BACKEND ---

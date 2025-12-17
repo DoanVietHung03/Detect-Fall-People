@@ -1,6 +1,9 @@
 # Dùng base image Python 3.12-slim 
 FROM python:3.12-slim
 
+# Để log từ Python in ra console ngay lập tức 
+ENV PYTHONUNBUFFERED=1
+
 # Cài đặt các thư viện hệ thống bắt buộc cho OpenCV và PyTorch
 RUN apt-get update && apt-get install -y \
     libgl1 \
