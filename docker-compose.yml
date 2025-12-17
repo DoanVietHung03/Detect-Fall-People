@@ -31,11 +31,9 @@ services:
     command: uvicorn pythonFile.api_server:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
-      - "8501:8501"
     volumes:
       - ./snapshots:/app/snapshots
       - ./weights:/app/weights
-    working_dir: /app
     deploy:
       resources:
         reservations:
@@ -43,18 +41,4 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    restart: always
-
-  # --- 4. DASHBOARD ---
-  dashboard:
-    build: .
-    container_name: fall_detection_dashboard
-    depends_on:
-      - api
-    command: streamlit run pythonFile/dashboard.py
-    network_mode: service:api
-    environment:
-      - API_URL=http://localhost:8000
-    volumes:
-      - ./snapshots:/app/snapshots
     restart: always

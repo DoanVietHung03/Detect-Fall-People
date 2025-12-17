@@ -6,9 +6,7 @@ Pillow==10.4.0
 pydantic==2.10.6
 Requests==2.32.3
 scikit_learn==1.7.2
-streamlit==1.40.0
-streamlit_autorefresh==1.0.1
-streamlit_drawable_canvas==0.9.3
+jinja2==3.1.6
 supervision==0.26.1
 tqdm==4.67.1
 ultralytics==8.3.186
