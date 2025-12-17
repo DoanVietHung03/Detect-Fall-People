@@ -18,7 +18,18 @@ from inference import FallDetector
 from camera_loader import CameraStream  
 
 # --- CONFIG ---
-SNAPSHOT_DIR = "../snapshots"
+# Lấy đường dẫn tuyệt đối của file hiện tại (api_server.py) -> /app/pythonFile/api_server.py
+current_file_path = os.path.abspath(__file__)
+
+# Lấy thư mục cha chứa file này -> /app/pythonFile
+current_dir = os.path.dirname(current_file_path)
+
+# Lấy thư mục cha của thư mục chứa file (Project Root) -> /app
+project_root = os.path.dirname(current_dir)
+
+# Tạo đường dẫn tuyệt đối tới folder snapshots -> /app/snapshots
+SNAPSHOT_DIR = os.path.join(project_root, "snapshots")
+
 if not os.path.exists(SNAPSHOT_DIR): os.makedirs(SNAPSHOT_DIR)
 
 CAMERAS_CONFIG = {
@@ -35,10 +46,18 @@ class SmartCameraWorker:
         self.stream = CameraStream(rtsp_url, cam_id)
         
         # 2. Khởi tạo AI (Xử lý ảnh)
-        print(f"🤖 [{cam_id}] Loading AI...")
+        current_dir = os.path.dirname(os.path.abspath(__file__)) # /app/pythonFile
+        project_root = os.path.dirname(current_dir)              # /app
+        weights_dir = os.path.join(project_root, "weights")      # /app/weights
+        
+        path_pose = os.path.join(weights_dir, "yolo11s-pose.pt")
+        path_lstm = os.path.join(weights_dir, "lstm_fall_model.pth")
+
+        print(f"🤖 [{cam_id}] Loading AI from: {weights_dir}")
+        
         self.detector = FallDetector(
-            model_pose='../weights/yolo11m-pose.pt', 
-            model_lstm='../weights/lstm_fall_model.pth'
+            model_pose=path_pose, 
+            model_lstm=path_lstm
         )
         
         # Trạng thái chia sẻ cho API
@@ -71,8 +90,8 @@ class SmartCameraWorker:
                 continue
 
             # Resize xử lý cho nhanh
-            w = frame.shape[1] * 2/3
-            h = frame.shape[0] * 2/3
+            w = frame.shape[1] // 2
+            h = frame.shape[0] // 2
             frame_resized = cv2.resize(frame, (w, h))
 
             # --- AI INFERENCE ---

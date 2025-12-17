@@ -31,11 +31,10 @@ class FallLSTM(nn.Module):
         x = self.fc2(x)
         return x
 
-# --- 2. CLASS HYBRID DETECTOR (CẬP NHẬT LOGIC) ---
+# --- 2. CLASS HYBRID DETECTOR (ĐÃ FIX LỖI VẼ MÀU) ---
 class FallDetector:
-    def __init__(self, model_pose='weights/yolo11m-pose.pt', model_lstm='weights/lstm_fall_model.pth', conf_threshold=0.7, lstm_threshold=0.7):
+    def __init__(self, model_pose='../weights/yolo11m-pose.pt', model_lstm='../weights/lstm_fall_model.pth', conf_threshold=0.5):
         self.conf_threshold = conf_threshold
-        self.lstm_threshold = lstm_threshold
         self.device = torch.device(DEVICE)
 
         print(f"Loading YOLO ({model_pose})...")
@@ -50,37 +49,37 @@ class FallDetector:
         self.lstm_model.eval()
 
         # Tracker
-        self.tracker = ByteTrack(track_activation_threshold=0.2, lost_track_buffer=45)
+        self.tracker = ByteTrack(track_activation_threshold=0.2, lost_track_buffer=60, frame_rate=30)
 
-        # Annotators
+        # [FIX] Tạo 3 bộ Annotator riêng biệt cho 3 màu
+        # 1. GREEN (Bình thường)
         self.box_annotator_green = BoxAnnotator(color=ColorPalette([Color.GREEN]), thickness=2)
-        self.label_annotator_green = LabelAnnotator(text_color=Color.BLACK, text_scale=0.5)
-        
-        # Màu vàng: Cảnh báo (đang chờ confirm)
+        self.label_annotator_green = LabelAnnotator(color=ColorPalette([Color.GREEN]), text_color=Color.BLACK, text_scale=0.5)
+
+        # 2. YELLOW (Cảnh báo/Chờ)
         self.box_annotator_yellow = BoxAnnotator(color=ColorPalette([Color.YELLOW]), thickness=2)
-        self.label_annotator_yellow = LabelAnnotator(text_color=Color.BLACK, text_scale=0.5)
+        self.label_annotator_yellow = LabelAnnotator(color=ColorPalette([Color.YELLOW]), text_color=Color.BLACK, text_scale=0.5)
 
-        # Màu đỏ: Đã confirm ngã
+        # 3. RED (Ngã)
         self.box_annotator_red = BoxAnnotator(color=ColorPalette([Color.RED]), thickness=2)
-        self.label_annotator_red = LabelAnnotator(text_color=Color.WHITE, text_scale=0.5)
+        self.label_annotator_red = LabelAnnotator(color=ColorPalette([Color.RED]), text_color=Color.WHITE, text_scale=0.5)
 
-        self.track_history = {} 
+        # --- MEMORY MANAGEMENT ---
         self.SEQUENCE_LENGTH = 30
+        self.track_history = {}
         self.last_valid_pose = {}
-        
-        # --- NEW: LOGIC BUSINESS ---
-        self.fall_start_times = {}  # Lưu thời điểm bắt đầu ngã của từng ID: {id: timestamp}
-        self.CONFIRM_DELAY = 2.0    # Cần nằm im 2 giây mới báo động
-        
-        # Safe Zones: List các đa giác (polygon). Ví dụ hardcode 1 vùng (bạn có thể truyền từ ngoài vào)
-        # Cấu trúc: [np.array([[x1,y1], [x2,y2], ...], np.int32)]
-        self.safe_zones = [] 
+        self.track_last_seen = {}    
+        self.MEMORY_TTL = 3.0
+
+        # Business Logic State
+        self.fall_start_times = {}
+        self.CONFIRM_DELAY = 2.0
+        self.safe_zones = []
 
     def set_safe_zones(self, zones):
-        """Hàm cập nhật vùng an toàn từ API"""
         self.safe_zones = zones
 
-    # ================== CÁC HÀM PHỤ TRỢ (GIỮ NGUYÊN) ===================
+    # ================== HELPER FUNCTIONS (GIỮ NGUYÊN) ===================
     def calculate_aspect_ratio(self, box):
         w = box[2] - box[0]
         h = box[3] - box[1]
@@ -134,190 +133,192 @@ class FallDetector:
 
     def is_in_safe_zone(self, box):
         if not self.safe_zones: return False
-
-        # Lấy trọng tâm (Center) thay vì chân
         cx = int((box[0] + box[2]) / 2)
         cy = int((box[1] + box[3]) / 2) 
         center_point = (cx, cy)
-
         for zone in self.safe_zones:
-            # Sử dụng pointPolygonTest để kiểm tra điểm nằm trong đa giác
-            if cv2.pointPolygonTest(zone, center_point, False) >= 0:
-                return True
+            if cv2.pointPolygonTest(zone, center_point, False) >= 0: return True
         return False
 
-    # ================== MAIN PROCESS ==================
+    # ================== PROCESS FRAME ==================
     def process_frame(self, frame):
-        # 1. Detect
+        current_time = time.time()
+        
+        # 1. Detect & Track
         results = self.pose_model(frame, verbose=False, conf=self.conf_threshold, device=self.device, classes=[0])[0]
         detections = Detections.from_ultralytics(results)
         detections = self.tracker.update_with_detections(detections)
 
-        # Danh sách để vẽ
-        normal_indices = []
-        warning_indices = [] # Đang nghi ngờ ngã (chờ timer)
-        fall_confirmed_indices = [] # Đã xác nhận ngã
-        
-        labels_normal = []
-        labels_warning = []
-        labels_fall = []
-
-        current_ids = []
-        max_frame_score = 0.0
-
         yolo_boxes = results.boxes.xyxy.cpu().numpy() if results.boxes else []
         yolo_kps = results.keypoints.data.cpu().numpy() if results.keypoints else []
 
-        current_time = time.time()
+        lstm_batch_input = []
+        lstm_batch_ids = []
+        analysis_results = {} 
+        current_ids = []
 
+        # --- VÒNG LẶP 1: THU THẬP DỮ LIỆU ---
         for i, (track_box, track_id) in enumerate(zip(detections.xyxy, detections.tracker_id)):
             current_ids.append(track_id)
+            self.track_last_seen[track_id] = current_time
+
             if track_id not in self.track_history:
                 self.track_history[track_id] = deque(maxlen=self.SEQUENCE_LENGTH)
 
-            # Match Keypoints
             matched_kps = None
-            min_dist = 100
+            min_dist = 200
             track_center = ((track_box[0]+track_box[2])/2, (track_box[1]+track_box[3])/2)
             
             if len(yolo_kps) > 0:
                 for box_orig, kps_orig in zip(yolo_boxes, yolo_kps):
                     orig_ctr = ((box_orig[0]+box_orig[2])/2, (box_orig[1]+box_orig[3])/2)
                     dist = np.hypot(track_center[0]-orig_ctr[0], track_center[1]-orig_ctr[1])
-                    if dist < 50 and dist < min_dist:
+                    if dist < min_dist:
                         min_dist = dist
                         matched_kps = kps_orig
 
-            # --- A. PHÂN TÍCH HÀNH VI ---
-            is_potential_fall = False
-            reason = "OK"
+            norm_kps = [0.0] * 34
+            has_pose = False
             
-            aspect_ratio = self.calculate_aspect_ratio(track_box)
-            spine_angle = 90.0
-            legs_standing = True 
-            head_high = True
-            has_pose = matched_kps is not None
-            
-            # Update LSTM buffer
-            if has_pose:
-                ang = self.calculate_spine_angle(matched_kps)
-                if ang is not None: spine_angle = ang
-                legs_standing = self.check_legs_standing(matched_kps)
-                head_high = self.check_head_high(matched_kps, track_box[1], track_box[3])
+            if matched_kps is not None:
+                has_pose = True
                 norm_kps = self.normalize_keypoints(matched_kps, track_box)
                 self.last_valid_pose[track_id] = norm_kps
-                self.track_history[track_id].append(norm_kps)
-            else:
-                if track_id in self.last_valid_pose:
-                    self.track_history[track_id].append(self.last_valid_pose[track_id])
-                else:
-                    self.track_history[track_id].append([0.0]*34)
+            elif track_id in self.last_valid_pose:
+                norm_kps = self.last_valid_pose[track_id]
 
-            # Dự đoán LSTM
-            ai_prob = 0.0
+            self.track_history[track_id].append(norm_kps)
+
             if len(self.track_history[track_id]) == self.SEQUENCE_LENGTH:
-                seq = np.array([self.track_history[track_id]])
-                inp = torch.tensor(seq, dtype=torch.float32).to(self.device)
-                with torch.no_grad():
-                    out = self.lstm_model(inp)
-                    ai_prob = torch.softmax(out, dim=1)[0, 1].item()
+                lstm_batch_input.append(list(self.track_history[track_id]))
+                lstm_batch_ids.append(track_id)
 
-            # --- LOGIC NGÃ (GIỮ NGUYÊN) ---
+            analysis_results[track_id] = {
+                "box": track_box,
+                "kps": matched_kps,
+                "has_pose": has_pose,
+                "lstm_prob": 0.0,
+                "status": "NORMAL",
+                "label": ""
+            }
+
+        # --- VÒNG LẶP 2: BATCH INFERENCE ---
+        if len(lstm_batch_input) > 0:
+            inp_tensor = torch.tensor(np.array(lstm_batch_input), dtype=torch.float32).to(self.device)
+            with torch.no_grad():
+                out_tensor = self.lstm_model(inp_tensor)
+                probs = torch.softmax(out_tensor, dim=1)[:, 1].cpu().numpy()
+            
+            for idx, tid in enumerate(lstm_batch_ids):
+                analysis_results[tid]["lstm_prob"] = float(probs[idx])
+
+        # --- VÒNG LẶP 3: BUSINESS LOGIC & GROUPING ---
+        final_fall_count = 0
+        max_score = 0.0
+        
+        # [FIX] Gom index vào 3 nhóm để vẽ riêng
+        idx_green = []
+        labels_green = []
+        
+        idx_yellow = []
+        labels_yellow = []
+        
+        idx_red = []
+        labels_red = []
+        
+        for i, (track_box, track_id) in enumerate(zip(detections.xyxy, detections.tracker_id)):
+            data = analysis_results[track_id]
+            ai_prob = data["lstm_prob"]
+            kps = data["kps"]
+            has_pose = data["has_pose"]
+            aspect_ratio = self.calculate_aspect_ratio(track_box)
+            
+            is_potential_fall = False
+            reason = "OK"
+
             if has_pose:
-                if spine_angle < 15: 
-                    if not legs_standing: 
-                        is_potential_fall = True
-                        reason = f"R:LayFlat({int(spine_angle)})"
-                    else: reason = "Bending"
-                elif spine_angle < 60: 
+                spine_angle = self.calculate_spine_angle(kps) or 90
+                legs_standing = self.check_legs_standing(kps)
+                head_high = self.check_head_high(kps, track_box[1], track_box[3])
+                
+                if spine_angle < 45:
                     if not legs_standing:
-                        if ai_prob > 0.5: 
+                        if ai_prob > 0.5:
                             is_potential_fall = True
-                            reason = f"Hybrid:Angle+AI({ai_prob:.2f})"
-                        else:
-                            if not head_high:
-                                is_potential_fall = True
-                                reason = "R:LowHead"
-                    else: reason = "Bending"
-                else: 
-                    if aspect_ratio > 0.9 and not head_high and ai_prob > 0.6:
-                        is_potential_fall = True
-                        reason = "Hybrid:FrontFall"
+                            reason = f"Hybrid:AI({ai_prob:.2f})"
+                        elif spine_angle < 15:
+                            is_potential_fall = True
+                            reason = f"Rule:Flat({int(spine_angle)})"
             else:
-                if aspect_ratio > 1.2:
-                    if ai_prob > 0.4:
-                        is_potential_fall = True
-                        reason = f"LostPose+AI({ai_prob:.1f})"
-                    else:
-                        is_potential_fall = True
-                        reason = f"BoxRatio({aspect_ratio:.1f})"
+                if aspect_ratio > 1.2 and ai_prob > 0.6:
+                    is_potential_fall = True
+                    reason = f"Box+AI({ai_prob:.1f})"
 
-            # --- B. XỬ LÝ BUSINESS LOGIC (NEW) ---
+            if is_potential_fall and self.is_in_safe_zone(track_box):
+                is_potential_fall = False
+                reason = "SafeZone"
 
-            # 1. Kiểm tra Vùng An Toàn (ROI Check)
-            if is_potential_fall:
-                if self.is_in_safe_zone(track_box):
-                    is_potential_fall = False
-                    reason = "SafeZone" # Đã bị hủy do nằm trong vùng an toàn
+            # --- SORTING INTO GROUPS ---
+            label_text = f"ID:{track_id}"
 
-            # 2. Xử lý Timer (Confirmation Delay)
             if is_potential_fall:
                 if track_id not in self.fall_start_times:
-                    # Bắt đầu đếm giờ
                     self.fall_start_times[track_id] = current_time
-                    warning_indices.append(i)
-                    labels_warning.append(f"Wait... {reason}")
+                    # Add to Yellow Group
+                    idx_yellow.append(i)
+                    labels_yellow.append(f"Wait... {reason}")
                 else:
-                    # Đang trong thời gian chờ
                     elapsed = current_time - self.fall_start_times[track_id]
                     if elapsed > self.CONFIRM_DELAY:
-                        # Đã quá 3 giây -> CONFIRM FALL
-                        fall_confirmed_indices.append(i)
-                        labels_fall.append(f"FALL! {reason}")
-                        
-                        current_score = ai_prob if ai_prob > 0 else 0.95
-                        if current_score > max_frame_score: max_frame_score = current_score
+                        final_fall_count += 1
+                        if ai_prob > max_score: max_score = ai_prob
+                        # Add to Red Group
+                        idx_red.append(i)
+                        labels_red.append(f"FALL! {reason}")
                     else:
-                        # Chưa đủ thời gian
-                        remaining = self.CONFIRM_DELAY - elapsed
-                        warning_indices.append(i)
-                        labels_warning.append(f"Wait {remaining:.1f}s")
+                        # Add to Yellow Group
+                        idx_yellow.append(i)
+                        labels_yellow.append(f"Wait {2.0 - elapsed:.1f}s")
             else:
-                # Nếu người đứng dậy -> Reset timer
                 if track_id in self.fall_start_times:
                     del self.fall_start_times[track_id]
-                normal_indices.append(i)
-                labels_normal.append(f"ID:{track_id}")
+                # Add to Green Group
+                idx_green.append(i)
+                labels_green.append(label_text)
 
-        # Clean up timer cho ID đã mất
-        for k in list(self.fall_start_times.keys()):
-            if k not in current_ids:
-                del self.fall_start_times[k]
+        # Cleanup Memory
+        cleanup_ids = []
+        for tid, last_seen in self.track_last_seen.items():
+            if current_time - last_seen > self.MEMORY_TTL:
+                cleanup_ids.append(tid)
         
-        # Clean up tracker history
-        for k in list(self.track_history.keys()):
-            if k not in current_ids: del self.track_history[k]
+        for tid in cleanup_ids:
+            if tid in self.track_history: del self.track_history[tid]
+            if tid in self.last_valid_pose: del self.last_valid_pose[tid]
+            if tid in self.fall_start_times: del self.fall_start_times[tid]
+            if tid in self.track_last_seen: del self.track_last_seen[tid]
 
-        # Draw
+        # --- DRAWING (3 PASSES) ---
         ann = frame.copy()
-        
-        # Vẽ Safe Zones (Màu xanh dương nhạt)
         if self.safe_zones:
             cv2.polylines(ann, self.safe_zones, True, (255, 200, 0), 2)
-
-        if normal_indices:
-            det = detections[np.array(normal_indices)]
-            ann = self.box_annotator_green.annotate(ann, det)
-            ann = self.label_annotator_green.annotate(ann, det, labels_normal)
         
-        if warning_indices: # Màu Vàng
-            det = detections[np.array(warning_indices)]
-            ann = self.box_annotator_yellow.annotate(ann, det)
-            ann = self.label_annotator_yellow.annotate(ann, det, labels_warning)
+        # Vẽ nhóm GREEN
+        if idx_green:
+            det_green = detections[np.array(idx_green)]
+            ann = self.box_annotator_green.annotate(ann, det_green)
+            ann = self.label_annotator_green.annotate(ann, det_green, labels=labels_green)
 
-        if fall_confirmed_indices: # Màu Đỏ
-            det = detections[np.array(fall_confirmed_indices)]
-            ann = self.box_annotator_red.annotate(ann, det)
-            ann = self.label_annotator_red.annotate(ann, det, labels_fall)
+        # Vẽ nhóm YELLOW
+        if idx_yellow:
+            det_yellow = detections[np.array(idx_yellow)]
+            ann = self.box_annotator_yellow.annotate(ann, det_yellow)
+            ann = self.label_annotator_yellow.annotate(ann, det_yellow, labels=labels_yellow)
 
-        return ann, len(fall_confirmed_indices), max_frame_score
+        # Vẽ nhóm RED
+        if idx_red:
+            det_red = detections[np.array(idx_red)]
+            ann = self.box_annotator_red.annotate(ann, det_red)
+            ann = self.label_annotator_red.annotate(ann, det_red, labels=labels_red)
+
+        return ann, final_fall_count, max_score
