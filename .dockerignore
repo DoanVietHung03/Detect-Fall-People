@@ -16,4 +16,5 @@ venv
 
 # --- THÊM CÁC THƯ MỤC CỦA DỰ ÁN NÀY ---
 # Không cần dữ liệu training hoặc ảnh debug trong image production
+Dataset/
 samples/

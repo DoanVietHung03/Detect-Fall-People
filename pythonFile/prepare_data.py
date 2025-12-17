@@ -9,13 +9,13 @@ from tqdm import tqdm
 from config import DEVICE
 
 # --- CẤU HÌNH ---
-DATASET_ROOT = "Dataset"
+DATASET_ROOT = "../Dataset"
 CSV_FALLS = "urfall-cam0-falls.csv"
 CSV_ADLS = "urfall-cam0-adls.csv"
 
 SEQUENCE_LENGTH = 30
 STEP_SIZE = 5  # Giảm step size để lấy được nhiều mẫu ngã hơn
-MODEL_PATH = 'yolo11s-pose.pt'
+MODEL_PATH = '../weights/yolo11s-pose.pt'
 
 def get_csv_path(filename):
     """Tìm file CSV ở thư mục gốc hoặc trong Dataset"""

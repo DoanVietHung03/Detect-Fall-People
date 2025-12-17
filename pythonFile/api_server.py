@@ -51,13 +51,13 @@ class SmartCameraWorker:
         weights_dir = os.path.join(project_root, "weights")      # /app/weights
         
         path_pose = os.path.join(weights_dir, "yolo11s-pose.pt")
-        path_lstm = os.path.join(weights_dir, "lstm_fall_model.pth")
+        path_onnx = os.path.join(weights_dir, "gru_fall_model.onnx")
 
         print(f"🤖 [{cam_id}] Loading AI from: {weights_dir}")
         
         self.detector = FallDetector(
             model_pose=path_pose, 
-            model_lstm=path_lstm
+            model_onnx=path_onnx
         )
         
         # Trạng thái chia sẻ cho API
