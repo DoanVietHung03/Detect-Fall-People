@@ -28,24 +28,29 @@
                 <span id="status-{{ cam_id }}" class="px-3 py-1 rounded bg-green-900 text-green-300 text-xs font-bold">NORMAL</span>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
                 
-                <div class="relative bg-black rounded-lg overflow-hidden aspect-video">
-                    <img src="/video_feed?cam_id={{ cam_id }}" class="w-full h-full object-cover" loading="lazy">
+                <div class="relative bg-black rounded-lg overflow-hidden w-full">
+                    <img src="/video_feed?cam_id={{ cam_id }}" 
+                         class="w-full h-auto block object-contain" 
+                         style="min-height: 240px;" 
+                         loading="lazy">
                     <div class="absolute top-2 left-2 bg-red-600 text-white text-xs px-2 py-0.5 rounded animate-pulse">LIVE</div>
                 </div>
 
-                <div class="relative bg-gray-900 rounded-lg overflow-hidden aspect-video border border-gray-700 flex flex-col">
+                <div class="relative bg-gray-900 rounded-lg overflow-hidden border border-gray-700 w-full h-full min-h-[240px]">
                     <div class="absolute top-0 left-0 w-full bg-gray-800 bg-opacity-75 p-2 text-xs text-center text-gray-300 z-10">
                         📸 Best Evidence Snapshot
                     </div>
                     
-                    <img id="img-{{ cam_id }}" src="" class="w-full h-full object-contain hidden">
-                    
-                    <div id="place-{{ cam_id }}" class="w-full h-full flex items-center justify-center snapshot-placeholder text-gray-500">
-                        <div class="text-center">
-                            <p class="text-4xl mb-2">🔍</p>
-                            <p>No Fall Detected Yet</p>
+                    <div class="w-full h-full flex items-center justify-center bg-black">
+                        <img id="img-{{ cam_id }}" src="" class="w-full h-auto object-contain hidden">
+                        
+                        <div id="place-{{ cam_id }}" class="w-full h-full flex items-center justify-center snapshot-placeholder text-gray-500 absolute inset-0">
+                            <div class="text-center">
+                                <p class="text-4xl mb-2">🔍</p>
+                                <p class="text-sm">No Fall Detected</p>
+                            </div>
                         </div>
                     </div>
                 </div>
