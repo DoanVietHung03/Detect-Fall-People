@@ -49,15 +49,15 @@ class FallDetector:
 
         # Annotators (Đã fix lỗi màu - Chia thành 3 bộ riêng biệt)
         # 1. GREEN (Bình thường)
-        self.box_annotator_green = BoxAnnotator(color=ColorPalette([Color.GREEN]), thickness=2)
+        self.box_annotator_green = BoxAnnotator(color=ColorPalette([Color.GREEN]), thickness=1)
         self.label_annotator_green = LabelAnnotator(color=ColorPalette([Color.GREEN]), text_color=Color.BLACK, text_scale=0.5)
 
         # 2. YELLOW (Cảnh báo/Chờ)
-        self.box_annotator_yellow = BoxAnnotator(color=ColorPalette([Color.YELLOW]), thickness=2)
+        self.box_annotator_yellow = BoxAnnotator(color=ColorPalette([Color.YELLOW]), thickness=1)
         self.label_annotator_yellow = LabelAnnotator(color=ColorPalette([Color.YELLOW]), text_color=Color.BLACK, text_scale=0.5)
 
         # 3. RED (Ngã)
-        self.box_annotator_red = BoxAnnotator(color=ColorPalette([Color.RED]), thickness=2)
+        self.box_annotator_red = BoxAnnotator(color=ColorPalette([Color.RED]), thickness=1)
         self.label_annotator_red = LabelAnnotator(color=ColorPalette([Color.RED]), text_color=Color.WHITE, text_scale=0.5)
 
         # Memory Management
