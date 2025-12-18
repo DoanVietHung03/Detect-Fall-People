@@ -4,7 +4,10 @@ import uvicorn
 import time
 import os
 import sys
-import threading
+import torch
+import multiprocessing as mp # Import thư viện multiprocessing
+from queue import Empty, Full # Để xử lý ngoại lệ queue
+
 from typing import Dict
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -12,92 +15,78 @@ from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-# --- IMPORT MODULE CỦA BẠN ---
+# --- IMPORT MODULE ---
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from inference import FallDetector
 from camera_loader import CameraStream  
 
 # --- CONFIG ---
-# Lấy đường dẫn tuyệt đối của file hiện tại (api_server.py) -> /app/pythonFile/api_server.py
 current_file_path = os.path.abspath(__file__)
-
-# Lấy thư mục cha chứa file này -> /app/pythonFile
 current_dir = os.path.dirname(current_file_path)
-
-# Lấy thư mục cha của thư mục chứa file (Project Root) -> /app
 project_root = os.path.dirname(current_dir)
-
-# Tạo đường dẫn tuyệt đối tới folder snapshots -> /app/snapshots
 SNAPSHOT_DIR = os.path.join(project_root, "snapshots")
-
 if not os.path.exists(SNAPSHOT_DIR): os.makedirs(SNAPSHOT_DIR)
 
 CAMERAS_CONFIG = {
     "cam_1": "rtsp://rtsp-server:8554/cam_1",
-    "cam_2": "rtsp://rtsp-server:8554/cam_2"
+    "cam_2": "rtsp://rtsp-server:8554/cam_2",
+    # Thêm cam_3, cam_4... thoải mái
 }
 
-# --- WORKER: KẾT HỢP CAMERA STREAM + AI ---
-class SmartCameraWorker:
-    def __init__(self, cam_id, rtsp_url):
+# --- PROCESS CLASS (Thay thế Thread Class cũ) ---
+class CameraProcess(mp.Process):
+    def __init__(self, cam_id, rtsp_url, frame_queue, state_queue, command_event):
+        super().__init__()
         self.cam_id = cam_id
+        self.rtsp_url = rtsp_url
+        self.frame_queue = frame_queue   # Queue để gửi ảnh về API (hiển thị)
+        self.state_queue = state_queue   # Queue để gửi trạng thái (ngã hay không)
+        self.command_event = command_event # Event để báo dừng
         
-        # 1. Khởi tạo Stream (Lấy ảnh) - Dùng class bạn vừa tách
-        self.stream = CameraStream(rtsp_url, cam_id)
+        # CHÚ Ý: KHÔNG load model ở đây (đây là Process Cha)
+
+    def run(self):
+        # --- ĐÂY LÀ PROCESS CON (CHẠY ĐỘC LẬP) ---
+        print(f"🚀 [{self.cam_id}] Process Started. PID: {os.getpid()}")
         
-        # 2. Khởi tạo AI (Xử lý ảnh)
-        current_dir = os.path.dirname(os.path.abspath(__file__)) # /app/pythonFile
-        project_root = os.path.dirname(current_dir)              # /app
-        weights_dir = os.path.join(project_root, "weights")      # /app/weights
-        
-        path_pose = os.path.join(weights_dir, "yolo11s-pose.onnx")
+        # 1. Load Model (Chỉ load trong process con để mỗi con có CUDA context riêng)
+        weights_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "weights")
+        path_pose = os.path.join(weights_dir, "yolo11s-pose.onnx") 
         path_onnx = os.path.join(weights_dir, "gru_fall_model.onnx")
-
-        print(f"🤖 [{cam_id}] Loading AI from: {weights_dir}")
         
-        self.detector = FallDetector(
-            model_pose=path_pose, 
-            model_onnx=path_onnx
-        )
-        
-        # Trạng thái chia sẻ cho API
-        self.output_frame = None
-        self.lock = threading.Lock()
-        self.state = {"fall": False, "snapshot": None}
-        self.stopped = False
+        try:
+            detector = FallDetector(model_pose=path_pose, model_onnx=path_onnx)
+        except Exception as e:
+            print(f"❌ [{self.cam_id}] AI Init Failed: {e}")
+            return
 
-    def start(self):
-        # Bắt đầu luồng lấy ảnh
-        self.stream.start()
-        
-        # Bắt đầu luồng chạy AI
-        self.thread = threading.Thread(target=self.run_ai_loop)
-        self.thread.daemon = True
-        self.thread.start()
+        # 2. Khởi tạo Camera Stream
+        stream = CameraStream(self.rtsp_url, self.cam_id)
+        stream.start()
 
-    def run_ai_loop(self):
-        """Vòng lặp lấy ảnh từ Stream -> Đưa vào AI -> Lưu kết quả"""
         save_path = os.path.join(SNAPSHOT_DIR, self.cam_id)
         if not os.path.exists(save_path): os.makedirs(save_path)
         max_score_in_session = 0.0
+        
+        # Biến local lưu state để không spam queue
+        current_state = {"fall": False, "snapshot": None}
 
-        while not self.stopped:
-            # Lấy frame mới nhất từ CameraStream
-            status, frame = self.stream.read()
-            
+        while not self.command_event.is_set():
+            status, frame = stream.read()
             if not status or frame is None:
-                time.sleep(0.1)
+                time.sleep(0.01)
                 continue
 
-            # Resize xử lý cho nhanh
-            frame_resized = cv2.resize(frame, (640, 480))
+            # Resize & Inference
+            w = frame.shape[1] // 2
+            h = frame.shape[0] // 2
+            frame_resized = cv2.resize(frame, (w, h))
 
-            # --- AI INFERENCE ---
-            processed_frame, fall_count, score = self.detector.process_frame(frame_resized)
+            processed_frame, fall_count, score = detector.process_frame(frame_resized)
             is_fall = (fall_count > 0)
 
-            # Logic Snapshot (Giữ nguyên)
-            snapshot_url = self.state["snapshot"]
+            # Logic Snapshot (như cũ)
+            snapshot_url = current_state["snapshot"]
             if is_fall:
                 if score > max_score_in_session or score > 0.8:
                     max_score_in_session = score
@@ -106,45 +95,74 @@ class SmartCameraWorker:
                     snapshot_url = f"/snapshots/{self.cam_id}/{filename}?t={int(time.time())}"
             else:
                 if max_score_in_session > 0: max_score_in_session = 0.0
-
-            # Encode ảnh để API hiển thị
+            
+            # --- GỬI DỮ LIỆU VỀ API (QUAN TRỌNG) ---
+            
+            # 1. Gửi Frame (Dùng put_nowait và try-except để không bị block nếu queue đầy)
+            # Encode JPG trước khi gửi để giảm dung lượng qua Queue (quan trọng cho performance)
             ret, buffer = cv2.imencode('.jpg', processed_frame)
             if ret:
-                with self.lock:
-                    self.output_frame = buffer.tobytes()
-                    self.state = {"fall": is_fall, "snapshot": snapshot_url}
-            
-            # Giới hạn FPS xử lý AI (không cần chạy quá nhanh gây nóng máy)
-            # Nếu Camera 30fps nhưng AI chạy 15fps là đủ dùng
+                frame_bytes = buffer.tobytes()
+                try:
+                    # Nếu queue đầy, lấy cái cũ ra vứt đi để bỏ cái mới vào (luôn lấy ảnh mới nhất)
+                    if self.frame_queue.full():
+                        try: self.frame_queue.get_nowait()
+                        except Empty: pass 
+                    self.frame_queue.put_nowait(frame_bytes)
+                except Full:
+                    pass # Queue vẫn đầy thì bỏ qua frame này
+
+            # 2. Gửi State (Chỉ gửi khi có thay đổi hoặc định kỳ để tiết kiệm CPU)
+            new_state = {"fall": is_fall, "snapshot": snapshot_url}
+            if new_state != current_state or time.time() % 1.0 < 0.05: # Gửi mỗi 1s hoặc khi khác biệt
+                try:
+                    if self.state_queue.full():
+                        try: self.state_queue.get_nowait()
+                        except: pass
+                    self.state_queue.put_nowait(new_state)
+                    current_state = new_state
+                except: pass
+
+            # Giới hạn FPS AI (tùy chỉnh)
             time.sleep(0.03) 
+        
+        # Cleanup
+        stream.stop()
+        print(f"🛑 [{self.cam_id}] Process Stopped.")
 
-    def get_frame(self):
-        with self.lock:
-            return self.output_frame
-            
-    def get_state(self):
-        with self.lock:
-            return self.state
-
-    def stop(self):
-        self.stopped = True
-        self.stream.stop()
-        self.thread.join()
-
-# --- SERVER SETUP ---
-workers: Dict[str, SmartCameraWorker] = {}
+# --- QUẢN LÝ CÁC PROCESS ---
+processes = {}
+queues = {} # Lưu queue của từng cam: { "cam_1": {"frame": Q, "state": Q, "last_state_data": {}} }
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # STARTUP
+    # Set start method là 'spawn' để an toàn cho CUDA
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass # Đã set rồi thì thôi
+
+    print("🚀 Starting Camera Processes...")
     for cam_id, url in CAMERAS_CONFIG.items():
-        worker = SmartCameraWorker(cam_id, url)
-        worker.start()
-        workers[cam_id] = worker
+        # Tạo Queue với maxsize=1 (Chỉ giữ 1 frame/state mới nhất)
+        frame_q = mp.Queue(maxsize=1)
+        state_q = mp.Queue(maxsize=1)
+        stop_event = mp.Event()
+
+        p = CameraProcess(cam_id, url, frame_q, state_q, stop_event)
+        p.start()
+        
+        processes[cam_id] = {"process": p, "stop_event": stop_event}
+        queues[cam_id] = {"frame": frame_q, "state": state_q, "last_known_state": {"fall": False, "snapshot": None}}
+    
     yield
-    # SHUTDOWN
-    for worker in workers.values():
-        worker.stop()
+    
+    print("🛑 Shutting down Camera Processes...")
+    for cam_id, item in processes.items():
+        item["stop_event"].set()
+        item["process"].join(timeout=5)
+        if item["process"].is_alive():
+            item["process"].terminate()
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
@@ -157,20 +175,38 @@ async def read_root(request: Request):
 
 @app.get("/api/updates")
 def get_updates():
-    return {cid: w.get_state() for cid, w in workers.items()}
+    # Lấy state mới nhất từ Queue (Non-blocking)
+    results = {}
+    for cam_id, item in queues.items():
+        q = item["state"]
+        try:
+            # Lấy data mới nếu có
+            while not q.empty():
+                item["last_known_state"] = q.get_nowait()
+        except Empty:
+            pass
+        results[cam_id] = item["last_known_state"]
+    return results
 
 def frame_generator(cam_id):
-    worker = workers.get(cam_id)
+    if cam_id not in queues: return
+    frame_q = queues[cam_id]["frame"]
+    
     while True:
-        frame = worker.get_frame() if worker else None
-        if frame:
-            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(0.05) # 20 FPS view
+        try:
+            # Timeout 1s để tránh vòng lặp chết nếu process chết
+            frame_bytes = frame_q.get(timeout=1.0) 
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Empty:
+            # Nếu không có frame nào trong 1s (Camera mất kết nối hoặc lỗi)
+            # Có thể trả về ảnh placeholder hoặc chờ tiếp
+            time.sleep(0.1)
 
 @app.get("/video_feed")
 def video_feed(cam_id: str):
-    if cam_id not in workers: return HTMLResponse("Offline", 404)
+    if cam_id not in CAMERAS_CONFIG: return HTMLResponse("Not Found", 404)
     return StreamingResponse(frame_generator(cam_id), media_type="multipart/x-mixed-replace; boundary=frame")
 
 if __name__ == "__main__":
+    # Windows/Mac cần cái này, Linux Docker không bắt buộc nhưng nên có
     uvicorn.run(app, host="0.0.0.0", port=8000)
