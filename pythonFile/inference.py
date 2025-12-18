@@ -20,12 +20,12 @@ def softmax(x):
 
 # --- CLASS HYBRID DETECTOR (ONNX VERSION) ---
 class FallDetector:
-    def __init__(self, model_pose='weights/yolo11s-pose.pt', model_onnx='weights/gru_fall_model.onnx', conf_threshold=0.7):
+    def __init__(self, model_pose='weights/yolo11s-pose.onnx', model_onnx='weights/gru_fall_model.onnx', conf_threshold=0.7):
         self.conf_threshold = conf_threshold
         self.device = torch.device(DEVICE)
 
         print(f"Loading YOLO ({model_pose})...")
-        self.pose_model = YOLO(model_pose).to(self.device)
+        self.pose_model = YOLO(model_pose, task='pose')
         
         # --- LOAD ONNX MODEL ---
         print(f"🚀 Loading ONNX Model ({model_onnx})...")
@@ -263,7 +263,7 @@ class FallDetector:
                 
                 if spine_angle < 45:
                     if not legs_standing:
-                        if ai_prob > 0.5:
+                        if ai_prob > 0.7:
                             is_potential_fall = True
                             reason = f"AI:{ai_prob:.2f}"
                         elif spine_angle < 15:

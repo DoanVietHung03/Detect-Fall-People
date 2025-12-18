@@ -11,4 +11,5 @@ supervision==0.26.1
 tqdm==4.67.1
 ultralytics==8.3.186
 uvicorn[standard]==0.38.0
+onnx==1.17.0
 onnxruntime-gpu==1.22.0

@@ -50,7 +50,7 @@ class SmartCameraWorker:
         project_root = os.path.dirname(current_dir)              # /app
         weights_dir = os.path.join(project_root, "weights")      # /app/weights
         
-        path_pose = os.path.join(weights_dir, "yolo11s-pose.pt")
+        path_pose = os.path.join(weights_dir, "yolo11s-pose.onnx")
         path_onnx = os.path.join(weights_dir, "gru_fall_model.onnx")
 
         print(f"🤖 [{cam_id}] Loading AI from: {weights_dir}")
@@ -90,9 +90,7 @@ class SmartCameraWorker:
                 continue
 
             # Resize xử lý cho nhanh
-            w = frame.shape[1] // 2
-            h = frame.shape[0] // 2
-            frame_resized = cv2.resize(frame, (w, h))
+            frame_resized = cv2.resize(frame, (640, 480))
 
             # --- AI INFERENCE ---
             processed_frame, fall_count, score = self.detector.process_frame(frame_resized)
