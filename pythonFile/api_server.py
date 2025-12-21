@@ -5,9 +5,9 @@ import time
 import os
 import sys
 import torch
-import multiprocessing as mp # Import thư viện multiprocessing
-from queue import Empty, Full # Để xử lý ngoại lệ queue
-
+import multiprocessing as mp
+import numpy as np
+from queue import Empty, Full
 from typing import Dict
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -18,38 +18,40 @@ from fastapi.templating import Jinja2Templates
 # --- IMPORT MODULE ---
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from inference import FallDetector
-from camera_loader import CameraStream  
+from camera_loader import CameraStream
+# Import class quản lý bộ nhớ vừa tạo
+from shared_memory_utils import SharedFrameManager 
 
 # --- CONFIG ---
-current_file_path = os.path.abspath(__file__)
-current_dir = os.path.dirname(current_file_path)
-project_root = os.path.dirname(current_dir)
-SNAPSHOT_DIR = os.path.join(project_root, "snapshots")
+SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "snapshots")
 if not os.path.exists(SNAPSHOT_DIR): os.makedirs(SNAPSHOT_DIR)
 
 CAMERAS_CONFIG = {
     "cam_1": "rtsp://rtsp-server:8554/cam_1",
     "cam_2": "rtsp://rtsp-server:8554/cam_2",
-    # Thêm cam_3, cam_4... thoải mái
 }
 
-# --- PROCESS CLASS (Thay thế Thread Class cũ) ---
+# Kích thước cố định cho Shared Memory (Nên để bằng kích thước resize trong logic xử lý)
+SHM_WIDTH = 640
+SHM_HEIGHT = 480
+
+# --- PROCESS CLASS ---
 class CameraProcess(mp.Process):
-    def __init__(self, cam_id, rtsp_url, frame_queue, state_queue, command_event):
+    def __init__(self, cam_id, rtsp_url, shm_name, state_queue, command_event):
         super().__init__()
         self.cam_id = cam_id
         self.rtsp_url = rtsp_url
-        self.frame_queue = frame_queue   # Queue để gửi ảnh về API (hiển thị)
-        self.state_queue = state_queue   # Queue để gửi trạng thái (ngã hay không)
-        self.command_event = command_event # Event để báo dừng
-        
-        # CHÚ Ý: KHÔNG load model ở đây (đây là Process Cha)
+        self.shm_name = shm_name # Tên của vùng nhớ chung
+        self.state_queue = state_queue 
+        self.command_event = command_event
 
     def run(self):
-        # --- ĐÂY LÀ PROCESS CON (CHẠY ĐỘC LẬP) ---
         print(f"🚀 [{self.cam_id}] Process Started. PID: {os.getpid()}")
         
-        # 1. Load Model (Chỉ load trong process con để mỗi con có CUDA context riêng)
+        # 1. Kết nối vào Shared Memory đã tạo bởi Process Cha
+        shm_manager = SharedFrameManager(self.shm_name, SHM_WIDTH, SHM_HEIGHT, create=False)
+
+        # 2. Load Model
         weights_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "weights")
         path_pose = os.path.join(weights_dir, "yolo11s-pose.onnx") 
         path_onnx = os.path.join(weights_dir, "gru_fall_model.onnx")
@@ -60,32 +62,28 @@ class CameraProcess(mp.Process):
             print(f"❌ [{self.cam_id}] AI Init Failed: {e}")
             return
 
-        # 2. Khởi tạo Camera Stream
         stream = CameraStream(self.rtsp_url, self.cam_id)
         stream.start()
-
+        
         save_path = os.path.join(SNAPSHOT_DIR, self.cam_id)
         if not os.path.exists(save_path): os.makedirs(save_path)
-        max_score_in_session = 0.0
         
-        # Biến local lưu state để không spam queue
+        max_score_in_session = 0.0
         current_state = {"fall": False, "snapshot": None}
 
         while not self.command_event.is_set():
             status, frame = stream.read()
             if not status or frame is None:
-                time.sleep(0.01)
-                continue
+                time.sleep(0.01); continue
 
-            # Resize & Inference
-            w = frame.shape[1] // 2
-            h = frame.shape[0] // 2
-            frame_resized = cv2.resize(frame, (w, h))
+            # Resize về đúng kích thước Shared Memory
+            frame_resized = cv2.resize(frame, (SHM_WIDTH, SHM_HEIGHT))
 
+            # AI Inference
             processed_frame, fall_count, score = detector.process_frame(frame_resized)
             is_fall = (fall_count > 0)
 
-            # Logic Snapshot (như cũ)
+            # Snapshot Logic (Giữ nguyên)
             snapshot_url = current_state["snapshot"]
             if is_fall:
                 if score > max_score_in_session or score > 0.8:
@@ -96,111 +94,110 @@ class CameraProcess(mp.Process):
             else:
                 if max_score_in_session > 0: max_score_in_session = 0.0
             
-            # --- GỬI DỮ LIỆU VỀ API (QUAN TRỌNG) ---
-            
-            # 1. Gửi Frame (Dùng put_nowait và try-except để không bị block nếu queue đầy)
-            # Encode JPG trước khi gửi để giảm dung lượng qua Queue (quan trọng cho performance)
-            ret, buffer = cv2.imencode('.jpg', processed_frame)
-            if ret:
-                frame_bytes = buffer.tobytes()
-                try:
-                    # Nếu queue đầy, lấy cái cũ ra vứt đi để bỏ cái mới vào (luôn lấy ảnh mới nhất)
-                    if self.frame_queue.full():
-                        try: self.frame_queue.get_nowait()
-                        except Empty: pass 
-                    self.frame_queue.put_nowait(frame_bytes)
-                except Full:
-                    pass # Queue vẫn đầy thì bỏ qua frame này
+            # --- GHI VÀO SHARED MEMORY ---
+            # Thay vì queue.put(), ta ghi thẳng vào RAM
+            shm_manager.write(processed_frame)
 
-            # 2. Gửi State (Chỉ gửi khi có thay đổi hoặc định kỳ để tiết kiệm CPU)
+            # Gửi State (State nhỏ nên dùng Queue vẫn ổn)
             new_state = {"fall": is_fall, "snapshot": snapshot_url}
-            if new_state != current_state or time.time() % 1.0 < 0.05: # Gửi mỗi 1s hoặc khi khác biệt
+            if new_state != current_state or time.time() % 1.0 < 0.05:
                 try:
-                    if self.state_queue.full():
-                        try: self.state_queue.get_nowait()
-                        except: pass
+                    if self.state_queue.full(): self.state_queue.get_nowait()
                     self.state_queue.put_nowait(new_state)
                     current_state = new_state
                 except: pass
 
-            # Giới hạn FPS AI (tùy chỉnh)
-            time.sleep(0.03) 
+            time.sleep(0.03) # ~30 FPS limit
         
-        # Cleanup
         stream.stop()
+        shm_manager.close() # Đóng kết nối SHM
         print(f"🛑 [{self.cam_id}] Process Stopped.")
 
-# --- QUẢN LÝ CÁC PROCESS ---
+# --- QUẢN LÝ ---
 processes = {}
-queues = {} # Lưu queue của từng cam: { "cam_1": {"frame": Q, "state": Q, "last_state_data": {}} }
+queues = {} 
+shm_managers = {} # Lưu các object quản lý bộ nhớ của Cha
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Set start method là 'spawn' để an toàn cho CUDA
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass # Đã set rồi thì thôi
+    try: mp.set_start_method('spawn', force=True)
+    except RuntimeError: pass
 
-    print("🚀 Starting Camera Processes...")
+    print("🚀 Starting Camera Processes with SHARED MEMORY...")
+    
     for cam_id, url in CAMERAS_CONFIG.items():
-        # Tạo Queue với maxsize=1 (Chỉ giữ 1 frame/state mới nhất)
-        frame_q = mp.Queue(maxsize=1)
         state_q = mp.Queue(maxsize=1)
         stop_event = mp.Event()
+        
+        # TẠO SHARED MEMORY CHO CAM NÀY
+        shm_name = f"shm_{cam_id}"
+        # Process cha tạo vùng nhớ (create=True)
+        shm_mgr = SharedFrameManager(shm_name, SHM_WIDTH, SHM_HEIGHT, create=True)
+        shm_managers[cam_id] = shm_mgr
 
-        p = CameraProcess(cam_id, url, frame_q, state_q, stop_event)
+        # Truyền tên vùng nhớ (string) vào process con
+        p = CameraProcess(cam_id, url, shm_name, state_q, stop_event)
         p.start()
         
         processes[cam_id] = {"process": p, "stop_event": stop_event}
-        queues[cam_id] = {"frame": frame_q, "state": state_q, "last_known_state": {"fall": False, "snapshot": None}}
+        queues[cam_id] = {"state": state_q, "last_known_state": {"fall": False, "snapshot": None}}
     
     yield
     
-    print("🛑 Shutting down Camera Processes...")
+    print("🛑 Shutting down...")
     for cam_id, item in processes.items():
         item["stop_event"].set()
         item["process"].join(timeout=5)
-        if item["process"].is_alive():
-            item["process"].terminate()
+        if item["process"].is_alive(): item["process"].terminate()
+    
+    # Dọn dẹp bộ nhớ chia sẻ
+    print("🧹 Cleaning up Shared Memory...")
+    for mgr in shm_managers.values():
+        mgr.unlink() # Quan trọng: Giải phóng RAM cho OS
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
 templates = Jinja2Templates(directory="pythonFile/templates")
 
-# --- API ROUTES ---
+# --- ROUTES ---
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request, "cameras": CAMERAS_CONFIG})
 
 @app.get("/api/updates")
 def get_updates():
-    # Lấy state mới nhất từ Queue (Non-blocking)
     results = {}
     for cam_id, item in queues.items():
         q = item["state"]
         try:
-            # Lấy data mới nếu có
-            while not q.empty():
-                item["last_known_state"] = q.get_nowait()
-        except Empty:
-            pass
+            while not q.empty(): item["last_known_state"] = q.get_nowait()
+        except Empty: pass
         results[cam_id] = item["last_known_state"]
     return results
 
 def frame_generator(cam_id):
-    if cam_id not in queues: return
-    frame_q = queues[cam_id]["frame"]
+    """Đọc từ Shared Memory để stream về Browser"""
+    if cam_id not in shm_managers: return
+    
+    mgr = shm_managers[cam_id] # Lấy manager tương ứng
     
     while True:
-        try:
-            # Timeout 1s để tránh vòng lặp chết nếu process chết
-            frame_bytes = frame_q.get(timeout=1.0) 
-            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        except Empty:
-            # Nếu không có frame nào trong 1s (Camera mất kết nối hoặc lỗi)
-            # Có thể trả về ảnh placeholder hoặc chờ tiếp
+        # Đọc trực tiếp từ RAM (Cực nhanh)
+        frame = mgr.read()
+        
+        # Nếu frame đen xì (chưa có dữ liệu), chờ chút
+        if np.all(frame == 0):
             time.sleep(0.1)
+            continue
+
+        # Encode JPEG (Vẫn cần encode để gửi qua mạng, nhưng ta đã tiết kiệm công đoạn serialize qua Queue)
+        ret, buffer = cv2.imencode('.jpg', frame)
+        if ret:
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        
+        # Limit FPS hiển thị trên Web (không cần thiết phải 30fps nếu chỉ xem giám sát)
+        time.sleep(0.04) 
 
 @app.get("/video_feed")
 def video_feed(cam_id: str):
