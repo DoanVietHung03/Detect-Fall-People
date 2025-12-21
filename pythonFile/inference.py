@@ -8,7 +8,7 @@ from collections import deque
 from ultralytics import YOLO
 from supervision import ByteTrack, Detections, BoxAnnotator, LabelAnnotator, ColorPalette, Color
 import onnxruntime as ort
-from onnxruntime import SessionOptions # Import thêm để config log
+from onnxruntime import SessionOptions
 
 from config import DEVICE
 
@@ -182,7 +182,6 @@ class FallDetector:
         current_time = time.time()
         
         # 1. Detect YOLO
-        # Lưu ý: Khi dùng multiprocessing, device được tự động handle bởi Ultralytics/ONNX
         results = self.pose_model(frame, verbose=False, conf=self.conf_threshold, classes=[0])[0]
         detections = Detections.from_ultralytics(results)
         
@@ -331,16 +330,16 @@ class FallDetector:
             # --- ADAPTIVE LOGIC ---
             
             # CASE 1: NHÌN THẤY RÕ (> 60% cơ thể) -> Dùng luật chặt chẽ như cũ
-            if visibility > 0.6:
+            if visibility > 0.5:
                 spine_angle = self.calculate_spine_angle(kps) or 90
                 legs_standing = self.check_legs_standing(kps)
                 
                 # Nếu AI cực cao thì báo luôn (bất chấp góc)
-                if ai_prob > 0.85:
+                if ai_prob > 0.8:
                     is_potential_fall = True
-                    reason = f"Clear_AI:{ai_prob:.2f}"
+                    reason = f"FALL:{ai_prob:.2f}"
                 # Nếu AI khá + Góc nghiêng
-                elif ai_prob > 0.6 and spine_angle < 60:
+                elif ai_prob > 0.5 and spine_angle < 50:
                      if not legs_standing:
                         is_potential_fall = True
                         reason = f"Clear_Hybrid"
@@ -354,8 +353,8 @@ class FallDetector:
             elif visibility > 0.2: 
                 # Chỉ cần AI nghi ngờ + Hộp dẹt (Aspect Ratio)
                 # Aspect Ratio: W/H. Người đứng ~0.5. Người ngã/ngồi > 1.0
-                if ai_prob > 0.55: # Giảm ngưỡng AI xuống
-                    if aspect_ratio > 0.9: # Hộp bắt đầu bè ra
+                if ai_prob > 0.5: # Giảm ngưỡng AI xuống
+                    if aspect_ratio > 0.8: # Hộp bắt đầu bè ra
                         is_potential_fall = True
                         reason = f"Obscured_AI:{ai_prob:.2f}"
             

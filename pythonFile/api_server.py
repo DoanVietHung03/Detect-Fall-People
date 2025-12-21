@@ -208,5 +208,4 @@ def video_feed(cam_id: str):
     return StreamingResponse(frame_generator(cam_id), media_type="multipart/x-mixed-replace; boundary=frame")
 
 if __name__ == "__main__":
-    # Windows/Mac cần cái này, Linux Docker không bắt buộc nhưng nên có
     uvicorn.run(app, host="0.0.0.0", port=8000)
