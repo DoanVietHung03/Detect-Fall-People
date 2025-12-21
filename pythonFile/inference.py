@@ -14,7 +14,7 @@ from config import DEVICE
 
 # --- CLASS HELPER: SOFTMAX (NUMPY) ---
 def softmax(x):
-    """Tính Softmax trên Numpy Array để ra xác suất %"""
+    """Calculate Softmax for Numpy array of any size along the last axis."""
     e_x = np.exp(x - np.max(x, axis=1, keepdims=True))
     return e_x / e_x.sum(axis=1, keepdims=True)
 
@@ -32,7 +32,7 @@ class FallDetector:
         # 2. LOAD ONNX (CLASSIFIER)
         print(f"🚀 Loading ONNX Model ({model_onnx})...")
         if not os.path.exists(model_onnx):
-            print(f"❌ ERROR: Không tìm thấy file ONNX tại: {model_onnx}")
+            print(f"❌ ERROR: Cannot find ONNX file at: {model_onnx}")
         
         # Cấu hình để tắt cảnh báo "Memcpy nodes"
         sess_options = SessionOptions()
@@ -147,7 +147,7 @@ class FallDetector:
         return False
 
     def try_merge_tracks(self, new_id, new_box, current_time):
-        """Logic tìm track cũ để nối vào track mới"""
+        """Logic find best match from lost_tracks_buffer to merge new track"""
         best_match_id = None
         min_dist = float('inf')
         new_center = ((new_box[0]+new_box[2])/2, (new_box[1]+new_box[3])/2)
@@ -172,7 +172,7 @@ class FallDetector:
         return best_match_id
     
     def calculate_visibility(self, kps):
-        """Trả về % số điểm khớp nhìn thấy rõ"""
+        """Return ratio of visible keypoints (0.0 - 1.0)"""
         if kps is None or len(kps) == 0: return 0.0
         visible_count = sum(1 for p in kps if p[2] > 0.4) # Conf > 0.4 coi là thấy
         return visible_count / 17.0
