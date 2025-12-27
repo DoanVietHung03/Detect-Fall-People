@@ -37,13 +37,14 @@ SHM_HEIGHT = 480
 
 # --- PROCESS CLASS ---
 class CameraProcess(mp.Process):
-    def __init__(self, cam_id, rtsp_url, shm_name, state_queue, command_event):
+    def __init__(self, cam_id, rtsp_url, shm_name, state_queue, command_event, lock):
         super().__init__()
         self.cam_id = cam_id
         self.rtsp_url = rtsp_url
-        self.shm_name = shm_name # Tên của vùng nhớ chung
+        self.shm_name = shm_name
         self.state_queue = state_queue 
         self.command_event = command_event
+        self.lock = lock # Lưu cái lock này lại
 
     def run(self):
         print(f"🚀 [{self.cam_id}] Process Started. PID: {os.getpid()}")
@@ -129,14 +130,18 @@ async def lifespan(app: FastAPI):
         state_q = mp.Queue(maxsize=1)
         stop_event = mp.Event()
         
-        # TẠO SHARED MEMORY CHO CAM NÀY
+        # --- TẠO LOCK CHUNG TẠI ĐÂY ---
+        # Lock này thuộc về Process Cha, nhưng có thể truyền qua Process Con
+        shm_lock = mp.Lock() 
+        
         shm_name = f"shm_{cam_id}"
-        # Process cha tạo vùng nhớ (create=True)
-        shm_mgr = SharedFrameManager(shm_name, SHM_WIDTH, SHM_HEIGHT, create=True)
+        
+        # Truyền lock vào Manager của Cha (để hàm frame_generator dùng)
+        shm_mgr = SharedFrameManager(shm_name, SHM_WIDTH, SHM_HEIGHT, create=True, lock=shm_lock)
         shm_managers[cam_id] = shm_mgr
 
-        # Truyền tên vùng nhớ (string) vào process con
-        p = CameraProcess(cam_id, url, shm_name, state_q, stop_event)
+        # Truyền ĐÚNG cái lock đó vào Process Con
+        p = CameraProcess(cam_id, url, shm_name, state_q, stop_event, lock=shm_lock)
         p.start()
         
         processes[cam_id] = {"process": p, "stop_event": stop_event}

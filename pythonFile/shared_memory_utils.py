@@ -7,12 +7,12 @@ class SharedFrameManager:
     """
     Quản lý Shared Memory để truyền Video Frame giữa các Process
     """
-    def __init__(self, name, width, height, channels=3, create=False):
+    def __init__(self, name, width, height, channels=3, create=False, lock=None):
         self.name = name
         self.shape = (height, width, channels)
         # Tính kích thước byte cần thiết: H * W * C * 1 byte (uint8)
         self.nbytes = height * width * channels
-        self.lock = Lock() # Lock để tránh việc đang ghi thì bị đọc (gây xé hình)
+        self.lock = lock if lock is not None else Lock() # Lock để tránh việc đang ghi thì bị đọc (gây xé hình)
 
         if create:
             try:
