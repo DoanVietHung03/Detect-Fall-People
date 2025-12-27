@@ -12,13 +12,54 @@ from onnxruntime import SessionOptions
 
 from config import DEVICE
 
-# --- CLASS HELPER: SOFTMAX (NUMPY) ---
+# --- HELPER: SOFTMAX ---
 def softmax(x):
-    """Calculate Softmax for Numpy array of any size along the last axis."""
+    """Calculate Softmax for Numpy array along the last axis."""
     e_x = np.exp(x - np.max(x, axis=1, keepdims=True))
     return e_x / e_x.sum(axis=1, keepdims=True)
 
-# --- CLASS HYBRID DETECTOR ---
+# --- HELPER: TIME-BASED RESAMPLING (NEW) ---
+def resample_pose_sequence(history, target_length=30, window_duration=1.0):
+    """
+    Biến đổi lịch sử keypoints (có FPS không ổn định) thành chuỗi 30 frame chuẩn theo thời gian.
+    
+    Args:
+        history: List các tuple (timestamp, keypoints_vector_34)
+        target_length: Số lượng frame model yêu cầu (30)
+        window_duration: Thời gian cửa sổ quan sát (1.0s)
+    """
+    if len(history) < 2:
+        return None
+
+    # Lấy thời gian hiện tại từ frame cuối cùng
+    current_time = history[-1][0]
+    start_time = current_time - window_duration
+    
+    # 1. Lọc các frame nằm trong cửa sổ 1 giây gần nhất
+    valid_history = [h for h in history if h[0] >= start_time]
+    
+    # 2. Kiểm tra độ phủ thời gian:
+    # Nếu dữ liệu mới thu thập được < 0.2s (ví dụ mới track được 3-4 frame), chưa đủ để đoán
+    if not valid_history or (valid_history[-1][0] - valid_history[0][0] < 0.2):
+        return None
+
+    # 3. Tách Timestamp và Data
+    timestamps = np.array([h[0] for h in valid_history])
+    data = np.array([h[1] for h in valid_history]) # Shape: (N, 34)
+
+    # 4. Tạo các mốc thời gian chuẩn (đều nhau)
+    # Ví dụ: Tạo 30 điểm mốc từ t=0.0s đến t=1.0s
+    target_times = np.linspace(timestamps[0], timestamps[-1], target_length)
+
+    # 5. Nội suy tuyến tính (Linear Interpolation) cho từng đặc trưng
+    resampled_data = np.zeros((target_length, data.shape[1]), dtype=np.float32)
+    
+    for i in range(data.shape[1]): # Loop qua 34 features (x, y keypoints)
+        resampled_data[:, i] = np.interp(target_times, timestamps, data[:, i])
+        
+    return resampled_data.tolist()
+
+# --- CLASS FALL DETECTOR ---
 class FallDetector:
     def __init__(self, model_pose='weights/yolo11s-pose-fp16.onnx', model_onnx='weights/gru_fall_model_fp16.onnx', conf_threshold=0.7):
         self.conf_threshold = conf_threshold
@@ -29,13 +70,18 @@ class FallDetector:
         self.pose_model = YOLO(model_pose, task='pose') 
         
         # 2. LOAD ONNX (CLASSIFIER)
+        # Ưu tiên load model FP16 nếu có
         print(f"🚀 Loading ONNX Model ({model_onnx})...")
         if not os.path.exists(model_onnx):
-            print(f"❌ ERROR: Cannot find ONNX file at: {model_onnx}")
-        
+            print(f"⚠️ Warning: Không thấy file {model_onnx}, thử tìm file gốc...")
+            model_onnx = model_onnx.replace('_fp16', '') # Fallback về file gốc
+            if not os.path.exists(model_onnx):
+                print(f"❌ ERROR: Cannot find ONNX file at: {model_onnx}")
+
         sess_options = SessionOptions()
         sess_options.log_severity_level = 3
-
+        
+        # Cấu hình Providers (Ưu tiên GPU)
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
         try:
             self.ort_session = ort.InferenceSession(model_onnx, sess_options=sess_options, providers=providers)
@@ -47,7 +93,7 @@ class FallDetector:
         self.input_name = self.ort_session.get_inputs()[0].name
 
         # 3. TRACKER CONFIG
-        self.tracker = ByteTrack(track_activation_threshold=0.2, lost_track_buffer=90, frame_rate=30)
+        self.tracker = ByteTrack(track_activation_threshold=0.2, lost_track_buffer=60, frame_rate=30)
 
         # 4. ANNOTATORS
         self.box_annotator_green = BoxAnnotator(color=ColorPalette([Color.GREEN]), thickness=1)
@@ -59,23 +105,22 @@ class FallDetector:
         self.box_annotator_red = BoxAnnotator(color=ColorPalette([Color.RED]), thickness=1)
         self.label_annotator_red = LabelAnnotator(color=ColorPalette([Color.RED]), text_color=Color.WHITE, text_scale=0.5)
 
-        # 5. MEMORY & STATE
-        self.SEQUENCE_LENGTH = 30
-        self.MEMORY_TTL = 3.0        
+        # 5. MEMORY & STATE (UPDATED FOR TIME-BASED LOGIC)
+        self.MODEL_WINDOW_DURATION = 1.2  # Giữ dữ liệu trong 1.2 giây (dư ra một chút so với 1.0s training)
+        self.MODEL_INPUT_SIZE = 30        # Model yêu cầu đúng 30 frame
         
-        self.track_history = {}      # {id: deque([...])}
+        self.track_history = {}      # {id: list of (timestamp, kps_vector)} -> KHÔNG dùng deque nữa
         self.last_valid_pose = {}    # {id: normalized_kps}
         self.track_last_seen = {}    # {id: timestamp}
         self.track_last_box = {}     # {id: [x1, y1, x2, y2]}
         
-        # Buffer cho tính năng Merge Track
+        # Buffer Merge Track
         self.lost_tracks_buffer = {} 
         self.MERGE_DIST_THRESHOLD = 150 
         self.MERGE_TIME_THRESHOLD = 1.5 
 
-        # --- NEW: Head History cho tính năng phát hiện ngã dọc ---
-        # {id: deque([(timestamp, head_y_pixel, box_height), ...], maxlen=15)}
-        self.head_history = {}
+        # Head History (Vẫn dùng Deque vì logic đơn giản theo frame)
+        self.head_history = {} 
 
         # Business Logic
         self.fall_start_times = {}
@@ -93,6 +138,7 @@ class FallDetector:
 
     def calculate_spine_angle(self, kp):
         if len(kp) < 13: return None
+        # Check độ tin cậy của vai và hông
         if (kp[5][2] < 0.3 or kp[6][2] < 0.3 or kp[11][2] < 0.3 or kp[12][2] < 0.3): return None 
         shoulder_x = (kp[5][0] + kp[6][0]) / 2
         shoulder_y = (kp[5][1] + kp[6][1]) / 2
@@ -119,28 +165,19 @@ class FallDetector:
         return angle > 45.0 
 
     def check_head_high(self, kp, box_ymin, box_ymax):
-        """
-        Kiểm tra xem đầu có nằm ở phần trên của Box không.
-        Trả về True nếu đầu ở cao (bình thường), False nếu đầu ở thấp (bất thường).
-        """
         head_y = []
-        # Check Mũi, Mắt trái/phải, Tai trái/phải (0-4)
         for i in range(5): 
             if kp[i][2] > 0.3: head_y.append(kp[i][1])
-        
-        if not head_y: return True # Không thấy đầu -> Giả định là OK để tránh False Positive
-        
+        if not head_y: return True 
         avg_head_y = sum(head_y) / len(head_y)
         box_h = box_ymax - box_ymin
         # Nếu đầu nằm dưới 40% chiều cao box (tính từ đỉnh) -> Bất thường
         return (avg_head_y - box_ymin) / box_h < 0.4 
 
     def get_head_info(self, kp, box):
-        """Lấy thông tin Y của đầu để tính vận tốc rơi"""
         head_y_vals = []
         for i in range(5):
             if kp[i][2] > 0.4: head_y_vals.append(kp[i][1])
-        
         if not head_y_vals: return None
         avg_y = sum(head_y_vals) / len(head_y_vals)
         box_h = max(box[3] - box[1], 1e-6)
@@ -216,13 +253,13 @@ class FallDetector:
             if lid in self.track_last_box and len(self.track_history[lid]) > 5:
                 self.lost_tracks_buffer[lid] = {
                     "box": self.track_last_box[lid],
-                    "history": self.track_history[lid],
+                    "history": self.track_history[lid], # Lưu lại toàn bộ lịch sử (list)
                     "time": current_time
                 }
             del self.track_history[lid]
             if lid in self.track_last_seen: del self.track_last_seen[lid]
 
-        # Chuẩn bị Batch Input cho LSTM
+        # Prepare Batch Input
         lstm_batch_input = []
         lstm_batch_ids = []
         analysis_results = {} 
@@ -232,6 +269,7 @@ class FallDetector:
             self.track_last_seen[track_id] = current_time
             self.track_last_box[track_id] = track_box
 
+            # Init History (List thay vì Deque)
             if track_id not in self.track_history:
                 merged_old_id = self.try_merge_tracks(track_id, track_box, current_time)
                 if merged_old_id:
@@ -241,7 +279,7 @@ class FallDetector:
                         self.fall_start_times[track_id] = self.fall_start_times[merged_old_id]
                         del self.fall_start_times[merged_old_id]
                 else:
-                    self.track_history[track_id] = deque(maxlen=self.SEQUENCE_LENGTH)
+                    self.track_history[track_id] = [] # Khởi tạo List rỗng
 
             # Match Keypoints
             matched_kps = None
@@ -264,6 +302,7 @@ class FallDetector:
                 has_pose = True
                 current_norm_kps = self.normalize_keypoints(matched_kps, track_box)
                 
+                # Logic giữ pose ổn định khi bị che khuất một phần
                 if track_id in self.last_valid_pose:
                     last_kps = self.last_valid_pose[track_id]
                     final_kps = []
@@ -283,10 +322,25 @@ class FallDetector:
             elif track_id in self.last_valid_pose:
                 norm_kps = self.last_valid_pose[track_id]
 
-            self.track_history[track_id].append(norm_kps)
+            # --- THÊM DỮ LIỆU VÀO LỊCH SỬ (KÈM TIMESTAMP) ---
+            self.track_history[track_id].append((current_time, norm_kps))
 
-            if len(self.track_history[track_id]) == self.SEQUENCE_LENGTH:
-                lstm_batch_input.append(list(self.track_history[track_id]))
+            # --- CLEANUP: Xóa dữ liệu quá cũ ---
+            # Chỉ giữ lại dữ liệu trong khoảng MODEL_WINDOW_DURATION (ví dụ 1.2s)
+            while self.track_history[track_id] and \
+                  (current_time - self.track_history[track_id][0][0] > self.MODEL_WINDOW_DURATION):
+                self.track_history[track_id].pop(0)
+
+            # --- RESAMPLING: Nội suy dữ liệu ---
+            # Biến đổi list (timestamp, kps) hiện có thành đúng 30 frame
+            lstm_input = resample_pose_sequence(
+                self.track_history[track_id], 
+                target_length=self.MODEL_INPUT_SIZE,
+                window_duration=1.0 # 1.0s chuẩn của model
+            )
+
+            if lstm_input is not None:
+                lstm_batch_input.append(lstm_input)
                 lstm_batch_ids.append(track_id)
 
             analysis_results[track_id] = {
@@ -301,13 +355,15 @@ class FallDetector:
         if len(lstm_batch_input) > 0:
             input_data = np.array(lstm_batch_input, dtype=np.float32)
             ort_inputs = {self.input_name: input_data}
-            ort_outs = self.ort_session.run(None, ort_inputs)
-            
-            probs = softmax(ort_outs[0])
-            fall_probs = probs[:, 1] 
+            try:
+                ort_outs = self.ort_session.run(None, ort_inputs)
+                probs = softmax(ort_outs[0])
+                fall_probs = probs[:, 1] 
 
-            for idx, tid in enumerate(lstm_batch_ids):
-                analysis_results[tid]["lstm_prob"] = float(fall_probs[idx])
+                for idx, tid in enumerate(lstm_batch_ids):
+                    analysis_results[tid]["lstm_prob"] = float(fall_probs[idx])
+            except Exception as e:
+                print(f"Inference Error: {e}")
 
         # --- VÒNG LẶP 3: LOGIC & VISUALIZATION ---
         final_fall_count = 0
@@ -323,11 +379,11 @@ class FallDetector:
             kps = data["kps"]
             has_pose = data["has_pose"]
             
-            # 1. Tính toán các chỉ số vật lý
+            # Logic: Các chỉ số vật lý
             aspect_ratio = self.calculate_aspect_ratio(track_box)
             visibility = self.calculate_visibility(kps) if has_pose else 0.0
             
-            # --- LOGIC MỚI: HEAD DROP VELOCITY ---
+            # Logic: HEAD DROP VELOCITY
             is_head_drop = False
             head_drop_score = 0.0
             
@@ -350,9 +406,7 @@ class FallDetector:
                             if normalized_drop > 0.15: # Tụt 15% chiều cao
                                 is_head_drop = True
                                 head_drop_score = normalized_drop
-            # -------------------------------------
 
-            # Sử dụng hàm check_head_high
             is_head_high = True
             if has_pose:
                 is_head_high = self.check_head_high(kps, track_box[1], track_box[3])
@@ -360,48 +414,41 @@ class FallDetector:
             is_potential_fall = False
             reason = "OK"
 
-            # --- ADAPTIVE DECISION MAKING ---
+            # --- DECISION TREE ---
             
-            # PRIORITY 1: HEAD DROP (Ngã nhanh / Ngã dọc)
-            # Nếu phát hiện rơi nhanh VÀ AI nghi ngờ -> Báo ngay
+            # 1. Rơi nhanh + AI nghi ngờ
             if is_head_drop and ai_prob > 0.3:
                 is_potential_fall = True
-                reason = f"Velocity:{head_drop_score:.2f}"
+                reason = f"Vel:{head_drop_score:.2f}"
 
-            # PRIORITY 2: RÕ RÀNG (> 50% cơ thể)
+            # 2. Rõ ràng (> 50% cơ thể)
             elif visibility > 0.5:
                 spine_angle = self.calculate_spine_angle(kps) or 90
                 legs_standing = self.check_legs_standing(kps)
                 
                 if ai_prob > 0.8:
-                    # AI quá chắc chắn -> Fall
                     is_potential_fall = True
                     reason = f"AI:{ai_prob:.2f}"
                 elif ai_prob > 0.5:
-                    # AI hơi nghi ngờ -> Check thêm tư thế
-                    # Nếu góc người thấp HOẶC đầu chúi xuống thấp
                     if spine_angle < 50 or not is_head_high:
                          if not legs_standing:
                             is_potential_fall = True
-                            reason = f"Hybrid_Pose"
+                            reason = f"Hyb_Pose"
                 elif spine_angle < 20 and not is_head_high:
-                    # Nằm bẹp gí
                     is_potential_fall = True
-                    reason = "Flat_Pose"
+                    reason = "Flat"
 
-            # PRIORITY 3: BỊ CHE KHUẤT
+            # 3. Bị che khuất
             elif visibility > 0.2: 
-                # Nếu AI > 0.6 và khung hình bẹt ra
                 if ai_prob > 0.6 and aspect_ratio > 0.8: 
                     is_potential_fall = True
-                    reason = f"Obs_AI:{ai_prob:.2f}"
-                # Hoặc nếu AI vừa phải nhưng đầu tụt nhanh (đã bắt ở Priority 1)
+                    reason = f"Obs_AI"
             
-            # PRIORITY 4: MẤT POSE
+            # 4. Mất pose
             else:
-                if is_head_drop: # Trước khi mất pose thấy đầu rơi
+                if is_head_drop: 
                      is_potential_fall = True
-                     reason = "Drop_NoPose"
+                     reason = "Drop_NoP"
                 elif aspect_ratio > 1.2 and ai_prob > 0.5:
                     is_potential_fall = True
                     reason = "BoxOnly"
@@ -411,7 +458,7 @@ class FallDetector:
                 is_potential_fall = False
                 reason = "Safe"
 
-            # State Machine & Log
+            # State Machine
             if is_potential_fall:
                 if track_id not in self.fall_start_times:
                     self.fall_start_times[track_id] = current_time
@@ -432,17 +479,19 @@ class FallDetector:
                 idx_green.append(i)
                 labels_green.append(f"ID:{track_id}")
 
-        # CLEANUP
+        # CLEANUP (Memory Leak Prevention)
         cleanup_ids = []
         for tid, last_seen in self.track_last_seen.items():
-            if current_time - last_seen > self.MEMORY_TTL: cleanup_ids.append(tid)
+            if current_time - last_seen > 3.0: # 3s không thấy thì xóa
+                cleanup_ids.append(tid)
+        
         for tid in cleanup_ids:
-            if tid in self.track_history: del self.track_history[tid]
-            if tid in self.last_valid_pose: del self.last_valid_pose[tid]
-            if tid in self.fall_start_times: del self.fall_start_times[tid]
-            if tid in self.track_last_seen: del self.track_last_seen[tid]
-            if tid in self.track_last_box: del self.track_last_box[tid]
-            if tid in self.head_history: del self.head_history[tid]
+            self.track_history.pop(tid, None)
+            self.last_valid_pose.pop(tid, None)
+            self.fall_start_times.pop(tid, None)
+            self.track_last_seen.pop(tid, None)
+            self.track_last_box.pop(tid, None)
+            self.head_history.pop(tid, None)
 
         # DRAW
         ann = frame.copy()
