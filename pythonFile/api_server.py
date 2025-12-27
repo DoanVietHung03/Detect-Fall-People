@@ -54,8 +54,8 @@ class CameraProcess(mp.Process):
 
         # 2. Load Model
         weights_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "weights")
-        path_pose = os.path.join(weights_dir, "yolo11s-pose.onnx") 
-        path_onnx = os.path.join(weights_dir, "gru_fall_model.onnx")
+        path_pose = os.path.join(weights_dir, "yolo11s-pose-fp16.onnx") 
+        path_onnx = os.path.join(weights_dir, "gru_fall_model_fp16.onnx")
         
         try:
             detector = FallDetector(model_pose=path_pose, model_onnx=path_onnx)

@@ -20,7 +20,7 @@ def softmax(x):
 
 # --- CLASS HYBRID DETECTOR ---
 class FallDetector:
-    def __init__(self, model_pose='weights/yolo11s-pose.onnx', model_onnx='weights/gru_fall_model.onnx', conf_threshold=0.7):
+    def __init__(self, model_pose='weights/yolo11s-pose-fp16.onnx', model_onnx='weights/gru_fall_model_fp16.onnx', conf_threshold=0.7):
         self.conf_threshold = conf_threshold
         self.device = torch.device(DEVICE)
 
