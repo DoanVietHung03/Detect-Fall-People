@@ -4,6 +4,7 @@ import uvicorn
 import time
 import os
 import sys
+import asyncio
 import torch
 import multiprocessing as mp
 import numpy as np
@@ -19,7 +20,6 @@ from fastapi.templating import Jinja2Templates
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from inference import FallDetector
 from camera_loader import CameraStream
-# Import class quản lý bộ nhớ vừa tạo
 from shared_memory_utils import SharedFrameManager 
 
 # --- CONFIG ---
@@ -31,7 +31,6 @@ CAMERAS_CONFIG = {
     "cam_2": "rtsp://rtsp-server:8554/cam_2",
 }
 
-# Kích thước cố định cho Shared Memory (Nên để bằng kích thước resize trong logic xử lý)
 SHM_WIDTH = 640
 SHM_HEIGHT = 480
 
@@ -41,21 +40,24 @@ class CameraProcess(mp.Process):
         super().__init__()
         self.cam_id = cam_id
         self.rtsp_url = rtsp_url
-        self.shm_name = shm_name
+        self.shm_name = shm_name 
         self.state_queue = state_queue 
         self.command_event = command_event
-        self.lock = lock # Lưu cái lock này lại
+        self.lock = lock # Nhận Lock từ cha truyền vào (FIX LỖI SHARED MEMORY)
 
     def run(self):
         print(f"🚀 [{self.cam_id}] Process Started. PID: {os.getpid()}")
         
-        # 1. Kết nối vào Shared Memory đã tạo bởi Process Cha
+        # 1. Kết nối Shared Memory (Không tạo mới Lock, dùng lock được truyền vào)
+        # Lưu ý: Cần sửa nhẹ shared_memory_utils để nhận lock từ ngoài, 
+        # nhưng tạm thời ta sẽ gán lock thủ công sau khi init.
         shm_manager = SharedFrameManager(self.shm_name, SHM_WIDTH, SHM_HEIGHT, create=False)
+        shm_manager.lock = self.lock # GHI ĐÈ LOCK CỤC BỘ BẰNG LOCK ĐỒNG BỘ CỦA OS
 
         # 2. Load Model
         weights_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "weights")
         path_pose = os.path.join(weights_dir, "yolo11s-pose-fp16.onnx") 
-        path_onnx = os.path.join(weights_dir, "gru_fall_model_fp16.onnx")
+        path_onnx = os.path.join(weights_dir, "gru_fall_model_fp16.onnx") # Đã update sang FP16
         
         try:
             detector = FallDetector(model_pose=path_pose, model_onnx=path_onnx)
@@ -77,14 +79,14 @@ class CameraProcess(mp.Process):
             if not status or frame is None:
                 time.sleep(0.01); continue
 
-            # Resize về đúng kích thước Shared Memory
+            # Resize
             frame_resized = cv2.resize(frame, (SHM_WIDTH, SHM_HEIGHT))
 
             # AI Inference
             processed_frame, fall_count, score = detector.process_frame(frame_resized)
             is_fall = (fall_count > 0)
 
-            # Snapshot Logic (Giữ nguyên)
+            # Snapshot Logic
             snapshot_url = current_state["snapshot"]
             if is_fall:
                 if score > max_score_in_session or score > 0.8:
@@ -95,11 +97,10 @@ class CameraProcess(mp.Process):
             else:
                 if max_score_in_session > 0: max_score_in_session = 0.0
             
-            # --- GHI VÀO SHARED MEMORY ---
-            # Thay vì queue.put(), ta ghi thẳng vào RAM
+            # Write to SHM
             shm_manager.write(processed_frame)
 
-            # Gửi State (State nhỏ nên dùng Queue vẫn ổn)
+            # Update State
             new_state = {"fall": is_fall, "snapshot": snapshot_url}
             if new_state != current_state or time.time() % 1.0 < 0.05:
                 try:
@@ -108,57 +109,108 @@ class CameraProcess(mp.Process):
                     current_state = new_state
                 except: pass
 
-            time.sleep(0.03) # ~30 FPS limit
+            time.sleep(0.01) # Low latency
         
         stream.stop()
-        shm_manager.close() # Đóng kết nối SHM
+        shm_manager.close()
         print(f"🛑 [{self.cam_id}] Process Stopped.")
 
-# --- QUẢN LÝ ---
-processes = {}
-queues = {} 
-shm_managers = {} # Lưu các object quản lý bộ nhớ của Cha
+# --- GLOBAL VARIABLES ---
+# Cấu trúc mới: processes[cam_id] = { "process": obj, "stop_event": evt, "queue": q, "shm": mgr, "lock": lk, "url": str }
+system_state = {} 
 
+# --- WATCHDOG SERVICE ---
+async def watchdog_loop():
+    """Vòng lặp chạy ngầm kiểm tra sức khỏe các process"""
+    print("🐶 Watchdog Service Started!")
+    while True:
+        try:
+            for cam_id, data in system_state.items():
+                proc = data["process"]
+                
+                # Kiểm tra nếu process đã chết (exitcode is not None)
+                if not proc.is_alive():
+                    exit_code = proc.exitcode
+                    print(f"⚠️ ALERT: Camera Process [{cam_id}] died (Exit Code: {exit_code}). Restarting...")
+                    
+                    # 1. Dọn dẹp process cũ
+                    proc.join(timeout=1)
+                    
+                    # 2. Tạo process mới (Tái sử dụng Queue, Lock, SHM cũ)
+                    # Lưu ý: Không cần tạo lại SHM vì Process cha vẫn đang giữ liên kết
+                    new_stop_event = mp.Event()
+                    new_proc = CameraProcess(
+                        cam_id=cam_id,
+                        rtsp_url=data["url"],
+                        shm_name=data["shm_name"],
+                        state_queue=data["queue"],
+                        command_event=new_stop_event,
+                        lock=data["lock"]
+                    )
+                    
+                    new_proc.start()
+                    
+                    # 3. Cập nhật lại System State
+                    system_state[cam_id]["process"] = new_proc
+                    system_state[cam_id]["stop_event"] = new_stop_event
+                    print(f"✅ Camera [{cam_id}] restarted successfully! New PID: {new_proc.pid}")
+            
+        except Exception as e:
+            print(f"❌ Watchdog Error: {e}")
+        
+        # Ngủ 5 giây trước khi check lại
+        await asyncio.sleep(5)
+
+# --- LIFESPAN MANAGER ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try: mp.set_start_method('spawn', force=True)
     except RuntimeError: pass
 
-    print("🚀 Starting Camera Processes with SHARED MEMORY...")
+    print("🚀 Starting Camera System...")
     
+    # 1. Khởi tạo tài nguyên
     for cam_id, url in CAMERAS_CONFIG.items():
         state_q = mp.Queue(maxsize=1)
         stop_event = mp.Event()
         
-        # --- TẠO LOCK CHUNG TẠI ĐÂY ---
-        # Lock này thuộc về Process Cha, nhưng có thể truyền qua Process Con
-        shm_lock = mp.Lock() 
-        
+        # Shared Memory & Lock (Tạo tại cha)
         shm_name = f"shm_{cam_id}"
-        
-        # Truyền lock vào Manager của Cha (để hàm frame_generator dùng)
-        shm_mgr = SharedFrameManager(shm_name, SHM_WIDTH, SHM_HEIGHT, create=True, lock=shm_lock)
-        shm_managers[cam_id] = shm_mgr
+        shm_mgr = SharedFrameManager(shm_name, SHM_WIDTH, SHM_HEIGHT, create=True)
+        # Tạo Lock đa tiến trình
+        proc_lock = mp.Lock()
+        shm_mgr.lock = proc_lock # Gán lock cho cha dùng
 
-        # Truyền ĐÚNG cái lock đó vào Process Con
-        p = CameraProcess(cam_id, url, shm_name, state_q, stop_event, lock=shm_lock)
+        p = CameraProcess(cam_id, url, shm_name, state_q, stop_event, proc_lock)
         p.start()
         
-        processes[cam_id] = {"process": p, "stop_event": stop_event}
-        queues[cam_id] = {"state": state_q, "last_known_state": {"fall": False, "snapshot": None}}
+        # Lưu toàn bộ info cần thiết để restart sau này
+        system_state[cam_id] = {
+            "process": p,
+            "stop_event": stop_event,
+            "queue": state_q,
+            "shm_mgr": shm_mgr,  # Giữ ref để không bị GC
+            "shm_name": shm_name,
+            "lock": proc_lock,
+            "url": url,
+            "last_known_state": {"fall": False, "snapshot": None}
+        }
     
-    yield
+    # 2. Bắt đầu Watchdog (Background Task)
+    watchdog_task = asyncio.create_task(watchdog_loop())
+
+    yield # --- Server Running Here ---
     
     print("🛑 Shutting down...")
-    for cam_id, item in processes.items():
-        item["stop_event"].set()
-        item["process"].join(timeout=5)
-        if item["process"].is_alive(): item["process"].terminate()
+    watchdog_task.cancel() # Dừng watchdog
     
-    # Dọn dẹp bộ nhớ chia sẻ
-    print("🧹 Cleaning up Shared Memory...")
-    for mgr in shm_managers.values():
-        mgr.unlink() # Quan trọng: Giải phóng RAM cho OS
+    for cam_id, item in system_state.items():
+        item["stop_event"].set()
+        item["process"].join(timeout=3)
+        if item["process"].is_alive(): item["process"].terminate()
+        
+        # Cleanup SHM
+        item["shm_mgr"].unlink()
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
@@ -172,8 +224,8 @@ async def read_root(request: Request):
 @app.get("/api/updates")
 def get_updates():
     results = {}
-    for cam_id, item in queues.items():
-        q = item["state"]
+    for cam_id, item in system_state.items():
+        q = item["queue"]
         try:
             while not q.empty(): item["last_known_state"] = q.get_nowait()
         except Empty: pass
@@ -181,27 +233,21 @@ def get_updates():
     return results
 
 def frame_generator(cam_id):
-    """Đọc từ Shared Memory để stream về Browser"""
-    if cam_id not in shm_managers: return
+    if cam_id not in system_state: return
     
-    mgr = shm_managers[cam_id] # Lấy manager tương ứng
+    mgr = system_state[cam_id]["shm_mgr"]
     
     while True:
-        # Đọc trực tiếp từ RAM (Cực nhanh)
+        # Đọc từ RAM (sẽ dùng Lock của cha)
         frame = mgr.read()
         
-        # Nếu frame đen xì (chưa có dữ liệu), chờ chút
         if np.all(frame == 0):
-            time.sleep(0.1)
-            continue
+            time.sleep(0.1); continue
 
-        # Encode JPEG (Vẫn cần encode để gửi qua mạng, nhưng ta đã tiết kiệm công đoạn serialize qua Queue)
         ret, buffer = cv2.imencode('.jpg', frame)
         if ret:
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         
-        # Limit FPS hiển thị trên Web (không cần thiết phải 30fps nếu chỉ xem giám sát)
         time.sleep(0.04) 
 
 @app.get("/video_feed")
