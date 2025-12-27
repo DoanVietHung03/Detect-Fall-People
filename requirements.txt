@@ -13,3 +13,4 @@ ultralytics==8.3.186
 uvicorn[standard]==0.38.0
 onnx==1.17.0
 onnxruntime-gpu==1.22.0
+onnxconverter-common==1.16.0
