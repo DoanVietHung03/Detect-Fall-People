@@ -4,6 +4,7 @@ import uvicorn
 import time
 import datetime
 import os
+from dotenv import load_dotenv
 import sys
 import asyncio
 import torch
@@ -23,6 +24,9 @@ from inference import FallDetector
 from camera_loader import CameraStream
 from shared_memory_utils import SharedFrameManager 
 from noti_services import NotificationService
+
+# --- LOAD ENV ---
+load_dotenv()
 
 # --- CONFIG ---
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "snapshots")
@@ -126,8 +130,12 @@ system_state = {}
 notification_service = None
 
 # ⚠️ CẤU HÌNH TELEGRAM CỦA BẠN Ở ĐÂY ⚠️
-TELEGRAM_TOKEN = "8534838449:AAG0pq4a1uXonmnBshUCot4HQdR9FKp0qCg"
-TELEGRAM_CHAT_ID = "8564243388"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Kiểm tra xem có lấy được key không (để debug)
+if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    print("❌ LỖI: Chưa cấu hình TELEGRAM_TOKEN hoặc CHAT_ID trong file .env")
 
 # --- WATCHDOG SERVICE ---
 async def watchdog_loop():

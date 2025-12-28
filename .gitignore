@@ -5,3 +5,4 @@ Dataset/
 weights/
 data_kps/
 venv/
+.env
