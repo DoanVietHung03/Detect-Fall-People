@@ -2,6 +2,7 @@
 import cv2
 import uvicorn
 import time
+import datetime
 import os
 import sys
 import asyncio
@@ -21,6 +22,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from inference import FallDetector
 from camera_loader import CameraStream
 from shared_memory_utils import SharedFrameManager 
+from noti_services import NotificationService
 
 # --- CONFIG ---
 SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "snapshots")
@@ -101,8 +103,11 @@ class CameraProcess(mp.Process):
             shm_manager.write(processed_frame)
 
             # Update State
-            new_state = {"fall": is_fall, "snapshot": snapshot_url}
-            if new_state != current_state or time.time() % 1.0 < 0.05:
+            now_str = datetime.datetime.now().strftime("%H:%M:%S %d/%m")
+            new_state = {"fall": is_fall, "snapshot": snapshot_url, "score": float(score), "time": now_str}
+            if new_state["fall"] != current_state.get("fall", False) or \
+               (is_fall and score > current_state.get("score", 0.0)) or \
+               time.time() % 1.0 < 0.05:
                 try:
                     if self.state_queue.full(): self.state_queue.get_nowait()
                     self.state_queue.put_nowait(new_state)
@@ -118,6 +123,11 @@ class CameraProcess(mp.Process):
 # --- GLOBAL VARIABLES ---
 # Cấu trúc mới: processes[cam_id] = { "process": obj, "stop_event": evt, "queue": q, "shm": mgr, "lock": lk, "url": str }
 system_state = {} 
+notification_service = None
+
+# ⚠️ CẤU HÌNH TELEGRAM CỦA BẠN Ở ĐÂY ⚠️
+TELEGRAM_TOKEN = "8534838449:AAG0pq4a1uXonmnBshUCot4HQdR9FKp0qCg"
+TELEGRAM_CHAT_ID = "8564243388"
 
 # --- WATCHDOG SERVICE ---
 async def watchdog_loop():
@@ -160,10 +170,47 @@ async def watchdog_loop():
         
         # Ngủ 5 giây trước khi check lại
         await asyncio.sleep(5)
+        
+# Hàm chạy ngầm để check sự kiện
+async def event_processor():
+    print("🔔 Event Processor (Telegram) Started!")
+    while True:
+        try:
+            for cam_id, item in system_state.items():
+                # Kiểm tra xem hàng đợi có tin mới không
+                q = item["queue"]
+                if not q.empty():
+                    try:
+                        # Lấy trạng thái mới nhất
+                        new_state = q.get_nowait()
+                        
+                        # Cập nhật vào RAM để Web hiển thị
+                        item["last_known_state"] = new_state
+                        
+                        # LOGIC GỬI TELEGRAM
+                        if new_state["fall"] and notification_service:
+                            score = new_state.get("score", 0.0)
+                            snapshot = new_state.get("snapshot", "")
+                            event_time = new_state.get("time", "") # Lấy thời gian từ sự kiện
+                            
+                            # Gọi module notification kèm theo thời gian
+                            notification_service.send_alert(cam_id, snapshot, score, event_time)
+                            
+                    except Empty:
+                        pass
+        except Exception as e:
+            print(f"❌ Event Loop Error: {e}")
+        
+        await asyncio.sleep(0.05) # Nghỉ chút để đỡ tốn CPU
 
 # --- LIFESPAN MANAGER ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global notification_service
+    notification_service = NotificationService(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
+    print("📲 Telegram Service Ready!")
+    
+    # Thiết lập multiprocessing
     try: mp.set_start_method('spawn', force=True)
     except RuntimeError: pass
 
@@ -197,11 +244,13 @@ async def lifespan(app: FastAPI):
         }
     
     # 2. Bắt đầu Watchdog (Background Task)
+    event_task = asyncio.create_task(event_processor())
     watchdog_task = asyncio.create_task(watchdog_loop())
 
     yield # --- Server Running Here ---
     
     print("🛑 Shutting down...")
+    event_task.cancel() # Dừng check telegram
     watchdog_task.cancel() # Dừng watchdog
     
     for cam_id, item in system_state.items():
@@ -225,10 +274,6 @@ async def read_root(request: Request):
 def get_updates():
     results = {}
     for cam_id, item in system_state.items():
-        q = item["queue"]
-        try:
-            while not q.empty(): item["last_known_state"] = q.get_nowait()
-        except Empty: pass
         results[cam_id] = item["last_known_state"]
     return results
 

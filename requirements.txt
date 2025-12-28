@@ -14,3 +14,4 @@ uvicorn[standard]==0.38.0
 onnx==1.17.0
 onnxruntime-gpu==1.22.0
 onnxconverter-common==1.16.0
+paho-mqtt==2.1.0

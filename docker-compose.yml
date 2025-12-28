@@ -33,6 +33,9 @@ services:
     volumes:
       - ./snapshots:/app/snapshots
       - ./weights:/app/weights
+      - /etc/localtime:/etc/localtime:ro  # Đồng bộ giờ với máy chủ
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
     deploy:
       resources:
         reservations:
